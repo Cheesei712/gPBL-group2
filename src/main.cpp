@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <DHT.h>
-#include <Wire.h>
 #include <math.h>
 
 // ================================================================
@@ -12,8 +11,7 @@
 // LM35 OUT         -> GPIO 34 (ADC1, input only)
 // Steam/Rain AO    -> GPIO 35 (ADC1, input only, cap module bang 3.3 V)
 // Water level AO   -> GPIO 32 (ADC1, cap module bang 3.3 V)
-// MPU6050 SDA      -> GPIO 21
-// MPU6050 SCL      -> GPIO 22
+// KS0272 Vibration S -> GPIO 33 (ADC1, cap module bang 3.3 V)
 // Tat ca cac module phai noi chung GND voi ESP32.
 
 constexpr uint8_t DHT_PIN = 4;
@@ -22,13 +20,14 @@ constexpr uint8_t HC_ECHO_PIN = 26;
 constexpr uint8_t LM35_PIN = 34;
 constexpr uint8_t STEAM_PIN = 35;
 constexpr uint8_t WATER_PIN = 32;
-constexpr uint8_t I2C_SDA_PIN = 21;
-constexpr uint8_t I2C_SCL_PIN = 22;
+constexpr uint8_t VIBRATION_PIN = 33;
 
-constexpr uint8_t MPU6050_ADDRESS = 0x68;
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t SAMPLE_INTERVAL_MS = 2000;
 constexpr uint32_t ULTRASONIC_TIMEOUT_US = 30000;
+constexpr size_t VIBRATION_SAMPLE_COUNT = 250;
+constexpr uint32_t VIBRATION_SAMPLE_PERIOD_US = 1000; // Xap xi 1 kHz.
+constexpr float VIBRATION_EVENT_THRESHOLD_ADC = 80.0F;
 
 // Khoang cach tu HC-SR04 den moc day khi khong co nuoc.
 // Can do thuc te va thay gia tri nay sau khi lap cam bien.
@@ -54,19 +53,20 @@ struct SensorData {
   float steamPercent = 0.0F;
   int waterRaw = 0;
   float waterPercent = 0.0F;
-  float accelXG = NAN;
-  float accelYG = NAN;
-  float accelZG = NAN;
-  float accelMagnitudeG = NAN;
-  float dynamicAccelerationG = NAN;
-  float tiltXDeg = NAN;
-  float tiltYDeg = NAN;
+  int vibrationCurrentRaw = 0;
+  int vibrationMinRaw = 0;
+  int vibrationMaxRaw = 0;
+  int vibrationPeakToPeak = 0;
+  float vibrationMeanRaw = 0.0F;
+  float vibrationRmsRaw = 0.0F;
+  uint16_t vibrationEventCount = 0;
+  bool vibrationSaturated = false;
   bool dhtValid = false;
   bool lm35Valid = false;
   bool ultrasonicValid = false;
   bool steamValid = false;
   bool waterValid = false;
-  bool mpuValid = false;
+  bool vibrationValid = false;
 };
 
 float clampFloat(float value, float minimum, float maximum) {
@@ -79,43 +79,44 @@ float mapPercent(int raw, int rawAtZero, int rawAtFull) {
   return clampFloat(percent, 0.0F, 100.0F);
 }
 
-bool writeMpuRegister(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission(MPU6050_ADDRESS);
-  Wire.write(reg);
-  Wire.write(value);
-  return Wire.endTransmission() == 0;
-}
+void readCeramicVibration(SensorData &data) {
+  // Luu mot cua so mau de tinh bien do va RMS quanh gia tri nen cua cam bien.
+  uint16_t samples[VIBRATION_SAMPLE_COUNT];
+  uint32_t sum = 0;
+  int minimum = 4095;
+  int maximum = 0;
 
-bool initializeMpu6050() {
-  // PWR_MGMT_1 = 0: danh thuc MPU6050; ACCEL_CONFIG = 0: thang do +/-2 g.
-  return writeMpuRegister(0x6B, 0x00) && writeMpuRegister(0x1C, 0x00);
-}
+  for (size_t i = 0; i < VIBRATION_SAMPLE_COUNT; ++i) {
+    const int raw = analogRead(VIBRATION_PIN);
+    samples[i] = static_cast<uint16_t>(raw);
+    sum += raw;
+    minimum = min(minimum, raw);
+    maximum = max(maximum, raw);
+    delayMicroseconds(VIBRATION_SAMPLE_PERIOD_US);
+  }
 
-bool readMpu6050(SensorData &data) {
-  Wire.beginTransmission(MPU6050_ADDRESS);
-  Wire.write(0x3B); // Thanh ghi ACCEL_XOUT_H.
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(MPU6050_ADDRESS, static_cast<size_t>(6), true) != 6) return false;
+  const float mean = sum / static_cast<float>(VIBRATION_SAMPLE_COUNT);
+  double squaredDeviationSum = 0.0;
+  bool previousAboveThreshold = false;
+  uint16_t eventCount = 0;
 
-  const int16_t rawX = static_cast<int16_t>((Wire.read() << 8) | Wire.read());
-  const int16_t rawY = static_cast<int16_t>((Wire.read() << 8) | Wire.read());
-  const int16_t rawZ = static_cast<int16_t>((Wire.read() << 8) | Wire.read());
+  for (size_t i = 0; i < VIBRATION_SAMPLE_COUNT; ++i) {
+    const float deviation = samples[i] - mean;
+    squaredDeviationSum += static_cast<double>(deviation) * deviation;
+    const bool aboveThreshold = fabsf(deviation) >= VIBRATION_EVENT_THRESHOLD_ADC;
+    if (aboveThreshold && !previousAboveThreshold) ++eventCount;
+    previousAboveThreshold = aboveThreshold;
+  }
 
-  constexpr float ACCEL_SCALE = 16384.0F; // LSB/g o thang +/-2 g.
-  data.accelXG = rawX / ACCEL_SCALE;
-  data.accelYG = rawY / ACCEL_SCALE;
-  data.accelZG = rawZ / ACCEL_SCALE;
-  data.accelMagnitudeG = sqrtf(data.accelXG * data.accelXG +
-                               data.accelYG * data.accelYG +
-                               data.accelZG * data.accelZG);
-  data.dynamicAccelerationG = fabsf(data.accelMagnitudeG - 1.0F);
-  data.tiltXDeg = atan2f(data.accelYG,
-                         sqrtf(data.accelXG * data.accelXG + data.accelZG * data.accelZG)) *
-                  180.0F / PI;
-  data.tiltYDeg = atan2f(-data.accelXG,
-                         sqrtf(data.accelYG * data.accelYG + data.accelZG * data.accelZG)) *
-                  180.0F / PI;
-  return true;
+  data.vibrationCurrentRaw = samples[VIBRATION_SAMPLE_COUNT - 1];
+  data.vibrationMinRaw = minimum;
+  data.vibrationMaxRaw = maximum;
+  data.vibrationPeakToPeak = maximum - minimum;
+  data.vibrationMeanRaw = mean;
+  data.vibrationRmsRaw = sqrtf(squaredDeviationSum / VIBRATION_SAMPLE_COUNT);
+  data.vibrationEventCount = eventCount;
+  data.vibrationSaturated = minimum == 0 || maximum == 4095;
+  data.vibrationValid = true; // analogRead da hoan tat du VIBRATION_SAMPLE_COUNT mau.
 }
 
 float readLm35Celsius() {
@@ -170,13 +171,13 @@ SensorData readAllSensors() {
   data.waterRaw = analogRead(WATER_PIN);
   data.waterPercent = mapPercent(data.waterRaw, WATER_EMPTY_RAW, WATER_FULL_RAW);
   data.waterValid = data.waterRaw >= 0 && data.waterRaw <= 4095;
-  data.mpuValid = readMpu6050(data);
+  readCeramicVibration(data);
   return data;
 }
 
 bool allSensorsValid(const SensorData &data) {
   return data.dhtValid && data.lm35Valid && data.ultrasonicValid &&
-         data.steamValid && data.waterValid && data.mpuValid;
+         data.steamValid && data.waterValid && data.vibrationValid;
 }
 
 void printFloatOrError(float value, uint8_t decimals = 2) {
@@ -222,16 +223,14 @@ void printJsonPayload(const SensorData &data) {
   Serial.printf(",\"adc_raw\":%d,\"level_percent\":%.2f},",
                 data.waterRaw, data.waterPercent);
 
-  Serial.print("\"mpu6050\":{\"valid\":");
-  Serial.print(data.mpuValid ? "true" : "false");
-  Serial.print(",\"accel_x_g\":"); printJsonNumber(data.accelXG);
-  Serial.print(",\"accel_y_g\":"); printJsonNumber(data.accelYG);
-  Serial.print(",\"accel_z_g\":"); printJsonNumber(data.accelZG);
-  Serial.print(",\"magnitude_g\":"); printJsonNumber(data.accelMagnitudeG);
-  Serial.print(",\"dynamic_g\":"); printJsonNumber(data.dynamicAccelerationG);
-  Serial.print(",\"tilt_x_deg\":"); printJsonNumber(data.tiltXDeg);
-  Serial.print(",\"tilt_y_deg\":"); printJsonNumber(data.tiltYDeg);
-  Serial.print("},");
+  Serial.print("\"ks0272_vibration\":{\"valid\":");
+  Serial.print(data.vibrationValid ? "true" : "false");
+  Serial.printf(",\"current_raw\":%d,\"min_raw\":%d,\"max_raw\":%d,",
+                data.vibrationCurrentRaw, data.vibrationMinRaw, data.vibrationMaxRaw);
+  Serial.printf("\"peak_to_peak_raw\":%d,\"mean_raw\":%.2f,\"rms_raw\":%.2f,",
+                data.vibrationPeakToPeak, data.vibrationMeanRaw, data.vibrationRmsRaw);
+  Serial.printf("\"event_count\":%u,\"saturated\":%s},",
+                data.vibrationEventCount, data.vibrationSaturated ? "true" : "false");
 
   Serial.print("\"all_sensors_valid\":");
   Serial.print(allSensorsValid(data) ? "true" : "false");
@@ -265,16 +264,13 @@ void printReport(const SensorData &data) {
   Serial.printf("WATER      | ADC raw: %d/4095 | Muc nuoc: %.1f %%\n",
                 data.waterRaw, data.waterPercent);
 
-  Serial.print("MPU6050    | ax/ay/az: ");
-  printFloatOrError(data.accelXG, 3); Serial.print(" / ");
-  printFloatOrError(data.accelYG, 3); Serial.print(" / ");
-  printFloatOrError(data.accelZG, 3); Serial.print(" g | magnitude: ");
-  printFloatOrError(data.accelMagnitudeG, 3); Serial.print(" g | dynamic: ");
-  printFloatOrError(data.dynamicAccelerationG, 3); Serial.println(" g");
-  Serial.print("            | Nghieng X/Y: ");
-  printFloatOrError(data.tiltXDeg, 1); Serial.print(" / ");
-  printFloatOrError(data.tiltYDeg, 1);
-  Serial.printf(" deg | %s\n", data.mpuValid ? "OK" : "KHONG TIM THAY");
+  Serial.printf("KS0272     | Raw: %d | Min/Max: %d/%d | Peak-to-peak: %d\n",
+                data.vibrationCurrentRaw, data.vibrationMinRaw,
+                data.vibrationMaxRaw, data.vibrationPeakToPeak);
+  Serial.printf("            | Mean: %.2f | RMS: %.2f | Events: %u | Saturated: %s | %s\n",
+                data.vibrationMeanRaw, data.vibrationRmsRaw,
+                data.vibrationEventCount, data.vibrationSaturated ? "YES" : "NO",
+                data.vibrationValid ? "OK" : "LOI DOC");
 
   Serial.println("------------------------------------------------------------");
   Serial.printf("TRANG THAI  | Tat ca cam bien: %s\n",
@@ -282,7 +278,8 @@ void printReport(const SensorData &data) {
   if (!data.dhtValid) Serial.println("KHUYEN CAO  | Kiem tra day DATA/nguon cua DHT11.");
   if (!data.lm35Valid) Serial.println("KHUYEN CAO  | Kiem tra OUT/nguon va hieu chuan LM35.");
   if (!data.ultrasonicValid) Serial.println("KHUYEN CAO  | Kiem tra HC-SR04 va cau chia ap chan ECHO.");
-  if (!data.mpuValid) Serial.println("KHUYEN CAO  | Kiem tra SDA/SCL va dia chi MPU6050 0x68.");
+  if (!data.vibrationValid) Serial.println("KHUYEN CAO  | Kiem tra chan S/nguon cua KS0272.");
+  if (data.vibrationSaturated) Serial.println("KHUYEN CAO  | Tin hieu KS0272 cham bien ADC 0/4095; kiem tra nguon va day S.");
   printJsonPayload(data);
   Serial.println("============================================================");
 }
@@ -299,15 +296,14 @@ void setup() {
   analogSetPinAttenuation(LM35_PIN, ADC_11db);
   analogSetPinAttenuation(STEAM_PIN, ADC_11db);
   analogSetPinAttenuation(WATER_PIN, ADC_11db);
+  analogSetPinAttenuation(VIBRATION_PIN, ADC_11db);
 
   dht.begin();
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  Wire.setClock(400000);
-  const bool mpuReady = initializeMpu6050();
 
   Serial.println("\nESP32 MULTI-HAZARD SENSOR NODE");
   Serial.printf("Serial: %lu baud | Chu ky: %lu ms\n", SERIAL_BAUD, SAMPLE_INTERVAL_MS);
-  Serial.printf("MPU6050 khoi tao: %s\n", mpuReady ? "THANH CONG" : "THAT BAI");
+  Serial.printf("KS0272: GPIO %u | %u mau/cua so | threshold: %.0f ADC\n",
+                VIBRATION_PIN, VIBRATION_SAMPLE_COUNT, VIBRATION_EVENT_THRESHOLD_ADC);
   Serial.println("Luu y: hay hieu chuan cac hang *_RAW va SENSOR_TO_BOTTOM_CM.");
 }
 
