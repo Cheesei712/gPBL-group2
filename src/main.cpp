@@ -6,7 +6,7 @@
 // SO DO CHAN - ESP32 DEV MODULE
 // ================================================================
 // DHT11 DATA       -> GPIO 4  (them dien tro keo len 10 kOhm neu cam bien roi)
-// HC-SR04 TRIG     -> GPIO 25
+// HC-SR04 TRIG     -> GPIO 21
 // HC-SR04 ECHO     -> GPIO 26 (BAT BUOC ha 5 V xuong 3.3 V bang cau chia ap)
 // LM35 OUT         -> GPIO 34 (ADC1, input only)
 // Steam/Rain AO    -> GPIO 35 (ADC1, input only, cap module bang 3.3 V)
@@ -15,7 +15,7 @@
 // Tat ca cac module phai noi chung GND voi ESP32.
 
 constexpr uint8_t DHT_PIN = 4;
-constexpr uint8_t HC_TRIG_PIN = 25;
+constexpr uint8_t HC_TRIG_PIN = 21;
 constexpr uint8_t HC_ECHO_PIN = 26;
 constexpr uint8_t LM35_PIN = 34;
 constexpr uint8_t STEAM_PIN = 35;
