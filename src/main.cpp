@@ -12,6 +12,7 @@
 // Steam/Rain AO    -> GPIO 35 (ADC1, input only, cap module bang 3.3 V)
 // Water level AO   -> GPIO 32 (ADC1, cap module bang 3.3 V)
 // KS0272 Vibration S -> GPIO 33 (ADC1, cap module bang 3.3 V)
+// BUZZER           -> GPIO 18 (Coi bao dong phat lien tuc)
 // Tat ca cac module phai noi chung GND voi ESP32.
 
 constexpr uint8_t DHT_PIN = 4;
@@ -21,6 +22,7 @@ constexpr uint8_t LM35_PIN = 34;
 constexpr uint8_t STEAM_PIN = 35;
 constexpr uint8_t WATER_PIN = 32;
 constexpr uint8_t VIBRATION_PIN = 33;
+constexpr uint8_t BUZZER_PIN = 18;
 
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t SAMPLE_INTERVAL_MS = 2000;
@@ -291,6 +293,9 @@ void setup() {
   pinMode(HC_TRIG_PIN, OUTPUT);
   pinMode(HC_ECHO_PIN, INPUT);
   digitalWrite(HC_TRIG_PIN, LOW);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, HIGH); // Phat coi buzzer lien tuc
 
   analogReadResolution(12);
   analogSetPinAttenuation(LM35_PIN, ADC_11db);
