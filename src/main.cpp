@@ -11,7 +11,7 @@
 // LM35 OUT         -> GPIO 34 (ADC1, input only)
 // Steam/Rain AO    -> GPIO 35 (ADC1, input only, cap module bang 3.3 V)
 // Water level AO   -> GPIO 32 (ADC1, cap module bang 3.3 V)
-// KS0272 Vibration S -> GPIO 33 (ADC1, cap module bang 3.3 V)
+// KS0272 Vibration S -> GPIO 22 (Luu y: GPIO 22 khong phai ADC pin)
 // BUZZER           -> GPIO 18 (Coi bao dong phat lien tuc)
 // Tat ca cac module phai noi chung GND voi ESP32.
 
@@ -21,7 +21,7 @@ constexpr uint8_t HC_ECHO_PIN = 26;
 constexpr uint8_t LM35_PIN = 34;
 constexpr uint8_t STEAM_PIN = 35;
 constexpr uint8_t WATER_PIN = 32;
-constexpr uint8_t VIBRATION_PIN = 33;
+constexpr uint8_t VIBRATION_PIN = 22;
 constexpr uint8_t BUZZER_PIN = 18;
 
 constexpr uint32_t SERIAL_BAUD = 115200;
