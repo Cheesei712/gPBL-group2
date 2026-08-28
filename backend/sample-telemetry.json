@@ -1,0 +1,41 @@
+{
+  "device_id": "esp32-node-01",
+  "timestamp_ms": 123456,
+  "dht11": {
+    "valid": true,
+    "temperature_c": 31.2,
+    "humidity_percent": 91.0
+  },
+  "lm35": {
+    "valid": true,
+    "temperature_c": 30.8
+  },
+  "hc_sr04": {
+    "valid": true,
+    "echo_time_us": 2500,
+    "distance_cm": 43.2,
+    "water_height_cm": 56.8
+  },
+  "steam_sensor": {
+    "valid": true,
+    "adc_raw": 2100,
+    "wet_percent": 70.0
+  },
+  "water_sensor": {
+    "valid": true,
+    "adc_raw": 1800,
+    "level_percent": 60.0
+  },
+  "ks0272_vibration": {
+    "valid": true,
+    "current_raw": 1520,
+    "min_raw": 1450,
+    "max_raw": 1710,
+    "peak_to_peak_raw": 260,
+    "mean_raw": 1515.4,
+    "rms_raw": 42.5,
+    "event_count": 2,
+    "saturated": false
+  },
+  "all_sensors_valid": true
+}

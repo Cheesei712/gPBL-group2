@@ -1,6 +1,20 @@
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <DHT.h>
+#include <WiFi.h>
 #include <math.h>
+
+#include "http_gateway.h"
+
+#if __has_include("device_secrets.h")
+#include "device_secrets.h"
+#else
+#define DEVICE_ID "esp32-node-01"
+#define DEVICE_WIFI_SSID ""
+#define DEVICE_WIFI_PASSWORD ""
+#define DEVICE_SERVER_URL "http://192.168.1.100:8000/api/v1/analyze"
+#define DEVICE_API_KEY ""
+#endif
 
 // ================================================================
 // SO DO CHAN - ESP32 DEV MODULE
@@ -12,7 +26,8 @@
 // Steam/Rain AO    -> GPIO 35 (ADC1, input only, cap module bang 3.3 V)
 // Water level AO   -> GPIO 32 (ADC1, cap module bang 3.3 V)
 // KS0272 Vibration S -> GPIO 33 (ADC1, cap module bang 3.3 V)
-// BUZZER           -> GPIO 18 (Coi bao dong phat lien tuc)
+// RGB common cathode  -> R: GPIO 16, G: GPIO 17, B: GPIO 19
+// Active buzzer       -> GPIO 18
 // Tat ca cac module phai noi chung GND voi ESP32.
 
 constexpr uint8_t DHT_PIN = 4;
@@ -22,14 +37,26 @@ constexpr uint8_t LM35_PIN = 34;
 constexpr uint8_t STEAM_PIN = 35;
 constexpr uint8_t WATER_PIN = 32;
 constexpr uint8_t VIBRATION_PIN = 33;
+constexpr uint8_t RGB_RED_PIN = 16;
+constexpr uint8_t RGB_GREEN_PIN = 17;
+constexpr uint8_t RGB_BLUE_PIN = 19;
 constexpr uint8_t BUZZER_PIN = 18;
 
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t SAMPLE_INTERVAL_MS = 2000;
+// Mot phut/request du de cap nhat output ma khong gay tai khong can thiet cho server.
+constexpr uint32_t ANALYZE_INTERVAL_MS = 60000;
+constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 10000;
 constexpr uint32_t ULTRASONIC_TIMEOUT_US = 30000;
+constexpr uint8_t ULTRASONIC_SAMPLE_COUNT = 5;
+constexpr uint8_t ULTRASONIC_MIN_VALID_SAMPLES = 3;
+constexpr uint32_t ULTRASONIC_GAP_MS = 40;
+constexpr float ULTRASONIC_MIN_DISTANCE_CM = 2.0F;
 constexpr size_t VIBRATION_SAMPLE_COUNT = 250;
 constexpr uint32_t VIBRATION_SAMPLE_PERIOD_US = 1000; // Xap xi 1 kHz.
 constexpr float VIBRATION_EVENT_THRESHOLD_ADC = 80.0F;
+constexpr uint8_t ANALOG_SAMPLE_COUNT = 16;
+constexpr int ADC_HIGH_RAIL_THRESHOLD = 4090;
 
 // Khoang cach tu HC-SR04 den moc day khi khong co nuoc.
 // Can do thuc te va thay gia tri nay sau khi lap cam bien.
@@ -43,6 +70,66 @@ constexpr int WATER_EMPTY_RAW = 0;
 constexpr int WATER_FULL_RAW = 3000;
 
 DHT dht(DHT_PIN, DHT11);
+HttpGateway gateway(DEVICE_SERVER_URL, DEVICE_API_KEY);
+
+enum class BuzzerState { OFF, BEEP, CONTINUOUS };
+
+class OutputController {
+ public:
+  void begin() {
+    pinMode(RGB_RED_PIN, OUTPUT);
+    pinMode(RGB_GREEN_PIN, OUTPUT);
+    pinMode(RGB_BLUE_PIN, OUTPUT);
+    pinMode(BUZZER_PIN, OUTPUT);
+    setRgb(false, false, true);  // Blue means waiting/unknown.
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  void apply(const ServerAnalysis &analysis) {
+    if (analysis.ledColor == "GREEN") setRgb(false, true, false);
+    else if (analysis.ledColor == "YELLOW") setRgb(true, true, false);
+    else if (analysis.ledColor == "RED") setRgb(true, false, false);
+    else setRgb(false, false, true);
+
+    if (analysis.buzzerMode == "CONTINUOUS") buzzerState_ = BuzzerState::CONTINUOUS;
+    else if (analysis.buzzerMode == "BEEP") buzzerState_ = BuzzerState::BEEP;
+    else buzzerState_ = BuzzerState::OFF;
+    lastToggleMs_ = millis();
+    buzzerOn_ = buzzerState_ == BuzzerState::CONTINUOUS;
+    digitalWrite(BUZZER_PIN, buzzerOn_ ? HIGH : LOW);
+  }
+
+  void update() {
+    if (buzzerState_ == BuzzerState::OFF) {
+      digitalWrite(BUZZER_PIN, LOW);
+      return;
+    }
+    if (buzzerState_ == BuzzerState::CONTINUOUS) {
+      digitalWrite(BUZZER_PIN, HIGH);
+      return;
+    }
+    const uint32_t now = millis();
+    const uint32_t duration = buzzerOn_ ? 200 : 800;
+    if (now - lastToggleMs_ >= duration) {
+      buzzerOn_ = !buzzerOn_;
+      lastToggleMs_ = now;
+      digitalWrite(BUZZER_PIN, buzzerOn_ ? HIGH : LOW);
+    }
+  }
+
+ private:
+  void setRgb(bool red, bool green, bool blue) {
+    digitalWrite(RGB_RED_PIN, red ? HIGH : LOW);
+    digitalWrite(RGB_GREEN_PIN, green ? HIGH : LOW);
+    digitalWrite(RGB_BLUE_PIN, blue ? HIGH : LOW);
+  }
+
+  BuzzerState buzzerState_ = BuzzerState::OFF;
+  bool buzzerOn_ = false;
+  uint32_t lastToggleMs_ = 0;
+};
+
+OutputController outputs;
 
 struct SensorData {
   float dhtTemperatureC = NAN;
@@ -117,8 +204,18 @@ void readCeramicVibration(SensorData &data) {
   data.vibrationMeanRaw = mean;
   data.vibrationRmsRaw = sqrtf(squaredDeviationSum / VIBRATION_SAMPLE_COUNT);
   data.vibrationEventCount = eventCount;
-  data.vibrationSaturated = minimum == 0 || maximum == 4095;
+  // KS0272 la tin hieu don cuc: raw=0 khi nghi la binh thuong, chi 4095 moi la cham tran.
+  data.vibrationSaturated = maximum >= ADC_HIGH_RAIL_THRESHOLD;
   data.vibrationValid = true; // analogRead da hoan tat du VIBRATION_SAMPLE_COUNT mau.
+}
+
+int readAveragedAdc(uint8_t pin) {
+  uint32_t sum = 0;
+  for (uint8_t i = 0; i < ANALOG_SAMPLE_COUNT; ++i) {
+    sum += analogRead(pin);
+    delayMicroseconds(250);
+  }
+  return static_cast<int>((sum + ANALOG_SAMPLE_COUNT / 2) / ANALOG_SAMPLE_COUNT);
 }
 
 float readLm35Celsius() {
@@ -142,6 +239,29 @@ uint32_t readUltrasonicEchoUs() {
   return pulseIn(HC_ECHO_PIN, HIGH, ULTRASONIC_TIMEOUT_US);
 }
 
+uint32_t readMedianUltrasonicEchoUs() {
+  uint32_t samples[ULTRASONIC_SAMPLE_COUNT];
+  uint8_t validCount = 0;
+  for (uint8_t i = 0; i < ULTRASONIC_SAMPLE_COUNT; ++i) {
+    const uint32_t echo = readUltrasonicEchoUs();
+    if (echo > 0) samples[validCount++] = echo;
+    if (i + 1 < ULTRASONIC_SAMPLE_COUNT) delay(ULTRASONIC_GAP_MS);
+  }
+  if (validCount < ULTRASONIC_MIN_VALID_SAMPLES) return 0;
+
+  // Sap xep mang nho de lay median, loai bo cac echo le do phan xa sai.
+  for (uint8_t i = 1; i < validCount; ++i) {
+    const uint32_t value = samples[i];
+    int8_t j = static_cast<int8_t>(i) - 1;
+    while (j >= 0 && samples[j] > value) {
+      samples[j + 1] = samples[j];
+      --j;
+    }
+    samples[j + 1] = value;
+  }
+  return samples[validCount / 2];
+}
+
 SensorData readAllSensors() {
   SensorData data;
 
@@ -158,21 +278,25 @@ SensorData readAllSensors() {
   const float compensationTempC = data.lm35Valid
                                       ? data.lm35TemperatureC
                                       : data.dhtTemperatureC;
-  data.echoTimeUs = readUltrasonicEchoUs();
+  data.echoTimeUs = readMedianUltrasonicEchoUs();
   if (data.echoTimeUs > 0 && !isnan(compensationTempC)) {
     const float speedOfSoundMps = 331.3F + 0.606F * compensationTempC;
     data.ultrasonicDistanceCm = data.echoTimeUs * speedOfSoundMps / 20000.0F;
-    data.waterHeightCm = clampFloat(SENSOR_TO_BOTTOM_CM - data.ultrasonicDistanceCm,
-                                    0.0F, SENSOR_TO_BOTTOM_CM);
-    data.ultrasonicValid = true;
+    if (data.ultrasonicDistanceCm >= ULTRASONIC_MIN_DISTANCE_CM &&
+        data.ultrasonicDistanceCm <= SENSOR_TO_BOTTOM_CM + 10.0F) {
+      data.waterHeightCm = clampFloat(SENSOR_TO_BOTTOM_CM - data.ultrasonicDistanceCm,
+                                      0.0F, SENSOR_TO_BOTTOM_CM);
+      data.ultrasonicValid = true;
+    }
   }
 
-  data.steamRaw = analogRead(STEAM_PIN);
+  data.steamRaw = readAveragedAdc(STEAM_PIN);
   data.steamPercent = mapPercent(data.steamRaw, STEAM_DRY_RAW, STEAM_WET_RAW);
-  data.steamValid = data.steamRaw >= 0 && data.steamRaw <= 4095;
-  data.waterRaw = analogRead(WATER_PIN);
+  // 0 co the la trang thai kho; 4095 lien tuc la cham rail/nham chan DO hoac qua ap.
+  data.steamValid = data.steamRaw >= 0 && data.steamRaw < ADC_HIGH_RAIL_THRESHOLD;
+  data.waterRaw = readAveragedAdc(WATER_PIN);
   data.waterPercent = mapPercent(data.waterRaw, WATER_EMPTY_RAW, WATER_FULL_RAW);
-  data.waterValid = data.waterRaw >= 0 && data.waterRaw <= 4095;
+  data.waterValid = data.waterRaw >= 0 && data.waterRaw < ADC_HIGH_RAIL_THRESHOLD;
   readCeramicVibration(data);
   return data;
 }
@@ -187,59 +311,43 @@ void printFloatOrError(float value, uint8_t decimals = 2) {
   else Serial.print(value, decimals);
 }
 
-void printJsonNumber(float value, uint8_t decimals = 3) {
-  if (isnan(value) || isinf(value)) Serial.print("null");
-  else Serial.print(value, decimals);
+String buildJsonPayload(const SensorData &data) {
+  JsonDocument document;
+  document["device_id"] = DEVICE_ID;
+  document["timestamp_ms"] = millis();
+
+  document["dht11"]["valid"] = data.dhtValid;
+  document["dht11"]["temperature_c"] = data.dhtTemperatureC;
+  document["dht11"]["humidity_percent"] = data.humidityPercent;
+  document["lm35"]["valid"] = data.lm35Valid;
+  document["lm35"]["temperature_c"] = data.lm35TemperatureC;
+  document["hc_sr04"]["valid"] = data.ultrasonicValid;
+  document["hc_sr04"]["echo_time_us"] = data.echoTimeUs;
+  document["hc_sr04"]["distance_cm"] = data.ultrasonicDistanceCm;
+  document["hc_sr04"]["water_height_cm"] = data.waterHeightCm;
+  document["steam_sensor"]["valid"] = data.steamValid;
+  document["steam_sensor"]["adc_raw"] = data.steamRaw;
+  document["steam_sensor"]["wet_percent"] = data.steamPercent;
+  document["water_sensor"]["valid"] = data.waterValid;
+  document["water_sensor"]["adc_raw"] = data.waterRaw;
+  document["water_sensor"]["level_percent"] = data.waterPercent;
+  document["ks0272_vibration"]["valid"] = data.vibrationValid;
+  document["ks0272_vibration"]["current_raw"] = data.vibrationCurrentRaw;
+  document["ks0272_vibration"]["min_raw"] = data.vibrationMinRaw;
+  document["ks0272_vibration"]["max_raw"] = data.vibrationMaxRaw;
+  document["ks0272_vibration"]["peak_to_peak_raw"] = data.vibrationPeakToPeak;
+  document["ks0272_vibration"]["mean_raw"] = data.vibrationMeanRaw;
+  document["ks0272_vibration"]["rms_raw"] = data.vibrationRmsRaw;
+  document["ks0272_vibration"]["event_count"] = data.vibrationEventCount;
+  document["ks0272_vibration"]["saturated"] = data.vibrationSaturated;
+  document["all_sensors_valid"] = allSensorsValid(data);
+
+  String payload;
+  serializeJson(document, payload);
+  return payload;
 }
 
-void printJsonPayload(const SensorData &data) {
-  // Mot object JSON tren mot dong, san sang lam payload dau vao cho LLM/API.
-  Serial.print("JSON_DATA: {");
-  Serial.printf("\"timestamp_ms\":%lu,", millis());
-
-  Serial.print("\"dht11\":{\"valid\":");
-  Serial.print(data.dhtValid ? "true" : "false");
-  Serial.print(",\"temperature_c\":"); printJsonNumber(data.dhtTemperatureC);
-  Serial.print(",\"humidity_percent\":"); printJsonNumber(data.humidityPercent);
-  Serial.print("},");
-
-  Serial.print("\"lm35\":{\"valid\":");
-  Serial.print(data.lm35Valid ? "true" : "false");
-  Serial.print(",\"temperature_c\":"); printJsonNumber(data.lm35TemperatureC);
-  Serial.print("},");
-
-  Serial.print("\"hc_sr04\":{\"valid\":");
-  Serial.print(data.ultrasonicValid ? "true" : "false");
-  Serial.printf(",\"echo_time_us\":%lu,\"distance_cm\":", data.echoTimeUs);
-  printJsonNumber(data.ultrasonicDistanceCm);
-  Serial.print(",\"water_height_cm\":"); printJsonNumber(data.waterHeightCm);
-  Serial.print("},");
-
-  Serial.print("\"steam_sensor\":{\"valid\":");
-  Serial.print(data.steamValid ? "true" : "false");
-  Serial.printf(",\"adc_raw\":%d,\"wet_percent\":%.2f},",
-                data.steamRaw, data.steamPercent);
-
-  Serial.print("\"water_sensor\":{\"valid\":");
-  Serial.print(data.waterValid ? "true" : "false");
-  Serial.printf(",\"adc_raw\":%d,\"level_percent\":%.2f},",
-                data.waterRaw, data.waterPercent);
-
-  Serial.print("\"ks0272_vibration\":{\"valid\":");
-  Serial.print(data.vibrationValid ? "true" : "false");
-  Serial.printf(",\"current_raw\":%d,\"min_raw\":%d,\"max_raw\":%d,",
-                data.vibrationCurrentRaw, data.vibrationMinRaw, data.vibrationMaxRaw);
-  Serial.printf("\"peak_to_peak_raw\":%d,\"mean_raw\":%.2f,\"rms_raw\":%.2f,",
-                data.vibrationPeakToPeak, data.vibrationMeanRaw, data.vibrationRmsRaw);
-  Serial.printf("\"event_count\":%u,\"saturated\":%s},",
-                data.vibrationEventCount, data.vibrationSaturated ? "true" : "false");
-
-  Serial.print("\"all_sensors_valid\":");
-  Serial.print(allSensorsValid(data) ? "true" : "false");
-  Serial.println("}");
-}
-
-void printReport(const SensorData &data) {
+void printReport(const SensorData &data, const String &payload) {
   Serial.println();
   Serial.println("============================================================");
   Serial.printf("BAO CAO CAM BIEN | uptime: %lu ms\n", millis());
@@ -261,10 +369,10 @@ void printReport(const SensorData &data) {
   printFloatOrError(data.waterHeightCm);
   Serial.printf(" cm | %s\n", data.ultrasonicValid ? "OK" : "TIMEOUT/LOI");
 
-  Serial.printf("STEAM/RAIN | ADC raw: %d/4095 | Muc uot: %.1f %%\n",
-                data.steamRaw, data.steamPercent);
-  Serial.printf("WATER      | ADC raw: %d/4095 | Muc nuoc: %.1f %%\n",
-                data.waterRaw, data.waterPercent);
+  Serial.printf("STEAM/RAIN | ADC raw: %d/4095 | Muc uot: %.1f %% | %s\n",
+                data.steamRaw, data.steamPercent, data.steamValid ? "OK" : "KET RAIL");
+  Serial.printf("WATER      | ADC raw: %d/4095 | Muc nuoc: %.1f %% | %s\n",
+                data.waterRaw, data.waterPercent, data.waterValid ? "OK" : "KET RAIL");
 
   Serial.printf("KS0272     | Raw: %d | Min/Max: %d/%d | Peak-to-peak: %d\n",
                 data.vibrationCurrentRaw, data.vibrationMinRaw,
@@ -280,10 +388,59 @@ void printReport(const SensorData &data) {
   if (!data.dhtValid) Serial.println("KHUYEN CAO  | Kiem tra day DATA/nguon cua DHT11.");
   if (!data.lm35Valid) Serial.println("KHUYEN CAO  | Kiem tra OUT/nguon va hieu chuan LM35.");
   if (!data.ultrasonicValid) Serial.println("KHUYEN CAO  | Kiem tra HC-SR04 va cau chia ap chan ECHO.");
+  if (!data.steamValid) Serial.println("KHUYEN CAO  | STEAM cham rail cao; kiem tra AO/DO va dien ap tin hieu.");
+  if (!data.waterValid) Serial.println("KHUYEN CAO  | WATER cham rail cao; kiem tra AO/DO va dien ap tin hieu.");
   if (!data.vibrationValid) Serial.println("KHUYEN CAO  | Kiem tra chan S/nguon cua KS0272.");
-  if (data.vibrationSaturated) Serial.println("KHUYEN CAO  | Tin hieu KS0272 cham bien ADC 0/4095; kiem tra nguon va day S.");
-  printJsonPayload(data);
+  if (data.vibrationSaturated) Serial.println("KHUYEN CAO  | KS0272 cham tran ADC 4095; tin hieu rung dang bi cat dinh.");
+  Serial.print("JSON_DATA: ");
+  Serial.println(payload);
   Serial.println("============================================================");
+}
+
+bool deviceConfigReady() {
+  return strlen(DEVICE_ID) > 0 && strlen(DEVICE_WIFI_SSID) > 0 &&
+         strlen(DEVICE_SERVER_URL) > 0 && strlen(DEVICE_API_KEY) > 0 &&
+         strcmp(DEVICE_WIFI_SSID, "your-wifi-name") != 0 &&
+         strcmp(DEVICE_API_KEY, "replace-with-the-same-key-as-backend") != 0;
+}
+
+void connectWifi() {
+  if (!deviceConfigReady()) {
+    Serial.println("HTTP disabled: device_secrets.h is missing or still has placeholder values.");
+    Serial.println("Copy include/device_secrets.example.h to include/device_secrets.h and edit it.");
+    return;
+  }
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(DEVICE_WIFI_SSID, DEVICE_WIFI_PASSWORD);
+  Serial.printf("Connecting WiFi to %s", DEVICE_WIFI_SSID);
+  for (uint8_t i = 0; i < 20 && WiFi.status() != WL_CONNECTED; ++i) {
+    delay(500);
+    Serial.print('.');
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf(" connected, IP: %s\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println(" not connected; firmware will retry.");
+  }
+}
+
+void requestAnalysis(const String &payload) {
+  ServerAnalysis analysis;
+  String error;
+  Serial.printf("POST %s\n", DEVICE_SERVER_URL);
+  if (!gateway.analyze(payload, analysis, error)) {
+    Serial.printf("SERVER ERROR | %s\n", error.c_str());
+    return;  // Keep the last known safe output state.
+  }
+
+  Serial.printf("SERVER RESULT | risk=%s | hazard=%s | confidence=%d%%\n",
+                analysis.riskLevel.c_str(), analysis.hazard.c_str(),
+                analysis.confidencePercent);
+  Serial.printf("ADVICE        | %s\n", analysis.advice.c_str());
+  Serial.printf("REASON        | %s\n", analysis.reason.c_str());
+  Serial.printf("OUTPUTS       | LED=%s | buzzer=%s\n",
+                analysis.ledColor.c_str(), analysis.buzzerMode.c_str());
+  outputs.apply(analysis);
 }
 
 void setup() {
@@ -304,8 +461,11 @@ void setup() {
   analogSetPinAttenuation(VIBRATION_PIN, ADC_11db);
 
   dht.begin();
+  outputs.begin();
+  connectWifi();
 
   Serial.println("\nESP32 MULTI-HAZARD SENSOR NODE");
+  Serial.printf("Device ID: %s\n", DEVICE_ID);
   Serial.printf("Serial: %lu baud | Chu ky: %lu ms\n", SERIAL_BAUD, SAMPLE_INTERVAL_MS);
   Serial.printf("KS0272: GPIO %u | %u mau/cua so | threshold: %.0f ADC\n",
                 VIBRATION_PIN, VIBRATION_SAMPLE_COUNT, VIBRATION_EVENT_THRESHOLD_ADC);
@@ -314,10 +474,25 @@ void setup() {
 
 void loop() {
   static uint32_t lastSampleMs = 0;
+  static uint32_t lastAnalyzeMs = 0;
+  static uint32_t lastWifiRetryMs = 0;
+  outputs.update();
+
   const uint32_t now = millis();
+  if (deviceConfigReady() && WiFi.status() != WL_CONNECTED &&
+      now - lastWifiRetryMs >= WIFI_RETRY_INTERVAL_MS) {
+    lastWifiRetryMs = now;
+    WiFi.reconnect();
+  }
   if (lastSampleMs == 0 || now - lastSampleMs >= SAMPLE_INTERVAL_MS) {
     lastSampleMs = now;
     const SensorData data = readAllSensors();
-    printReport(data);
+    const String payload = buildJsonPayload(data);
+    printReport(data, payload);
+    if (WiFi.status() == WL_CONNECTED &&
+        (lastAnalyzeMs == 0 || now - lastAnalyzeMs >= ANALYZE_INTERVAL_MS)) {
+      lastAnalyzeMs = now;
+      requestAnalysis(payload);
+    }
   }
 }
