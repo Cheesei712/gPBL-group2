@@ -75,6 +75,8 @@ class Hazard(StrEnum):
     HEAVY_RAIN = "HEAVY_RAIN"
     EXTREME_TEMPERATURE = "EXTREME_TEMPERATURE"
     ABNORMAL_VIBRATION = "ABNORMAL_VIBRATION"
+    EARTHQUAKE = "EARTHQUAKE"
+    BLIZZARD = "BLIZZARD"
     COMPOUND = "COMPOUND"
     SENSOR_ANOMALY = "SENSOR_ANOMALY"
     UNKNOWN = "UNKNOWN"
@@ -90,7 +92,7 @@ class LedColor(StrEnum):
 class BuzzerMode(StrEnum):
     OFF = "OFF"
     BEEP = "BEEP"
-    CONTINUOUS = "CONTINUOUS"
+    URGENT_BEEP = "URGENT_BEEP"
 
 
 class LlmAnalysis(StrictModel):

@@ -10,14 +10,18 @@ Giữ nguyên các chân cảm biến được ghi ở đầu `src/main.cpp`, sa
 
 | Thiết bị | Chân ESP32 |
 |---|---:|
-| RGB Red qua điện trở 220–330 Ω | GPIO 16 |
-| RGB Green qua điện trở 220–330 Ω | GPIO 17 |
-| RGB Blue qua điện trở 220–330 Ω | GPIO 19 |
-| Chân chung RGB cathode | GND |
+| LCD I2C SDA | GPIO 21 |
+| LCD I2C SCL | GPIO 22 |
+| RGB Red qua điện trở 220–330 Ω | GPIO 25 |
+| RGB Green qua điện trở 220–330 Ω | GPIO 33 |
+| RGB Blue qua điện trở 220–330 Ω | GPIO 27 |
+| Chân chung RGB VCC/anode | 3.3V |
 | Active buzzer signal | GPIO 18 |
 | Buzzer GND | GND |
 
-Code mặc định dành cho RGB common-cathode và active buzzer. Nếu buzzer cần dòng
+Code mặc định dành cho RGB common-VCC/common-anode (active-low), LCD I2C 16x2
+địa chỉ `0x27` và active buzzer. Vì GPIO21/22 dành cho I2C và GPIO33 dành cho RGB,
+HC-SR04 TRIG được chuyển sang GPIO23, KS0272 được chuyển sang GPIO36. Nếu buzzer cần dòng
 lớn hơn khả năng GPIO, phải điều khiển qua transistor, không cấp trực tiếp từ chân GPIO.
 
 Quy tắc output cố định ở backend:
@@ -28,6 +32,10 @@ Quy tắc output cố định ở backend:
 | `WARNING` | Yellow | Beep 200 ms mỗi giây |
 | `CRITICAL` | Red | Continuous |
 | `UNKNOWN` | Blue | Off |
+
+RGB uses PWM and fades for about one second between states. Green means safe,
+yellow gradually becomes orange for warnings, and orange gradually becomes red
+for critical danger. The exact shade also follows the LLM `confidence_percent`.
 
 ## 2. Chuẩn bị backend
 
@@ -79,6 +87,8 @@ uv run python simulator.py --scenario normal --device-key test-device-key
 uv run python simulator.py --scenario rain --device-key test-device-key
 uv run python simulator.py --scenario flood --device-key test-device-key
 uv run python simulator.py --scenario vibration --device-key test-device-key
+uv run python simulator.py --scenario earthquake --device-key test-device-key
+uv run python simulator.py --scenario blizzard --device-key test-device-key
 uv run python simulator.py --scenario compound --device-key test-device-key
 uv run python simulator.py --scenario sensor_error --device-key test-device-key
 ```
@@ -135,8 +145,9 @@ pio run --target upload
 pio device monitor --baud 115200
 ```
 
-Cứ 2 giây firmware đọc và in cảm biến; tối đa mỗi 60 giây nó gửi một request phân
-tích. Serial Monitor sẽ hiện các dòng dạng:
+Cứ 2 giây firmware đọc và in cảm biến thật. Ở chế độ demo mặc định, firmware gửi
+lần lượt đúng ba payload ảo `EARTHQUAKE`, `FLOOD`, `BLIZZARD`, cách nhau 15 giây,
+rồi dừng gọi LLM để tiết kiệm quota. Serial Monitor sẽ hiện các dòng dạng:
 
 ```text
 SERVER RESULT | risk=WARNING | hazard=HEAVY_RAIN | confidence=85%

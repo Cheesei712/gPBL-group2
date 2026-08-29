@@ -19,7 +19,7 @@ def test_gemini_wire_schema_avoids_unsupported_additional_properties() -> None:
     [
         ("normal", RiskLevel.NORMAL, Hazard.NONE, LedColor.GREEN, BuzzerMode.OFF),
         ("rain", RiskLevel.WARNING, Hazard.HEAVY_RAIN, LedColor.YELLOW, BuzzerMode.BEEP),
-        ("flood", RiskLevel.CRITICAL, Hazard.FLOOD, LedColor.RED, BuzzerMode.CONTINUOUS),
+        ("flood", RiskLevel.CRITICAL, Hazard.FLOOD, LedColor.RED, BuzzerMode.URGENT_BEEP),
         (
             "vibration",
             RiskLevel.WARNING,
@@ -27,7 +27,21 @@ def test_gemini_wire_schema_avoids_unsupported_additional_properties() -> None:
             LedColor.YELLOW,
             BuzzerMode.BEEP,
         ),
-        ("compound", RiskLevel.CRITICAL, Hazard.COMPOUND, LedColor.RED, BuzzerMode.CONTINUOUS),
+        (
+            "earthquake",
+            RiskLevel.CRITICAL,
+            Hazard.EARTHQUAKE,
+            LedColor.RED,
+            BuzzerMode.URGENT_BEEP,
+        ),
+        (
+            "blizzard",
+            RiskLevel.CRITICAL,
+            Hazard.BLIZZARD,
+            LedColor.RED,
+            BuzzerMode.URGENT_BEEP,
+        ),
+        ("compound", RiskLevel.CRITICAL, Hazard.COMPOUND, LedColor.RED, BuzzerMode.URGENT_BEEP),
         ("sensor_error", RiskLevel.UNKNOWN, Hazard.SENSOR_ANOMALY, LedColor.BLUE, BuzzerMode.OFF),
     ],
 )

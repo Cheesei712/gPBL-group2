@@ -20,12 +20,20 @@ from app.models import (
 logger = logging.getLogger(__name__)
 
 SYSTEM_INSTRUCTION = """
-Bạn là bộ phân tích dữ liệu môi trường cho một nút IoT ESP32.
-Chỉ sử dụng telemetry được cung cấp, không tự tạo thêm dữ liệu hoặc khẳng định chắc chắn
-một thảm họa khi cảm biến không đủ khả năng chứng minh. Kết hợp nhiệt độ, độ ẩm,
-mưa/hơi nước, mực nước, siêu âm và rung động. Nếu dữ liệu thiếu, mâu thuẫn hoặc cảm biến
-không hợp lệ, chọn UNKNOWN hoặc SENSOR_ANOMALY. CRITICAL chỉ dành cho nguy cơ trực tiếp,
-rõ ràng trong dữ liệu. Advice và reason phải bằng tiếng Việt, ngắn gọn, cụ thể.
+You analyze environmental telemetry for an ESP32 IoT sensor node.
+Use only the supplied telemetry. Do not invent measurements or claim that a disaster is
+certain when the sensors cannot prove it. Combine temperature, humidity, rain/steam,
+water level, ultrasonic distance, and vibration. Select UNKNOWN or SENSOR_ANOMALY when
+data is missing, inconsistent, or invalid. Reserve CRITICAL for a clear, immediate risk.
+
+Detect EARTHQUAKE for very strong repeated vibration and BLIZZARD for temperatures below
+0 C combined with high humidity. For the three demo scenarios: peak_to_peak_raw >= 1500
+or rms_raw >= 300 means CRITICAL/EARTHQUAKE; water_height_cm >= 80 or level_percent >= 85
+means CRITICAL/FLOOD; temperature <= 0 C and humidity_percent >= 70 means
+WARNING/BLIZZARD. Prioritize these rules when the telemetry is valid.
+
+Write advice and reason in concise English using ASCII characters so a 16x2 LCD can show
+them. Advice must be actionable and no longer than 80 characters.
 """.strip()
 
 # Generate Content currently rejects Pydantic's `additionalProperties` keyword.
@@ -76,7 +84,7 @@ def output_for_risk(risk: RiskLevel) -> OutputCommand:
         ),
         RiskLevel.CRITICAL: OutputCommand(
             led_color=LedColor.RED,
-            buzzer_mode=BuzzerMode.CONTINUOUS,
+            buzzer_mode=BuzzerMode.URGENT_BEEP,
         ),
         RiskLevel.UNKNOWN: OutputCommand(led_color=LedColor.BLUE, buzzer_mode=BuzzerMode.OFF),
     }
@@ -93,7 +101,7 @@ class GeminiService:
 
     async def analyze(self, telemetry: TelemetryRequest) -> AnalysisResponse:
         prompt = (
-            "Hãy đánh giá telemetry IoT sau và trả về đúng schema JSON:\n"
+            "Evaluate the following IoT telemetry and return the exact JSON schema:\n"
             f"{telemetry.model_dump_json(exclude_none=True)}"
         )
         try:
@@ -143,54 +151,76 @@ class RuleBasedService:
         water_height = telemetry.hc_sr04.water_height_cm or 0
         wet = telemetry.steam_sensor.wet_percent
         humidity = telemetry.dht11.humidity_percent or 0
+        temperatures = [
+            value
+            for value in (telemetry.dht11.temperature_c, telemetry.lm35.temperature_c)
+            if value is not None
+        ]
+        minimum_temperature = min(temperatures, default=25.0)
 
         if not telemetry.all_sensors_valid:
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.UNKNOWN,
                 hazard=Hazard.SENSOR_ANOMALY,
                 confidence_percent=100,
-                advice="Kiểm tra kết nối và hiệu chuẩn các cảm biến báo lỗi.",
-                reason="Có ít nhất một cảm biến không cung cấp dữ liệu hợp lệ.",
+                advice="Check the wiring and calibration of every failed sensor.",
+                reason="At least one sensor did not provide valid data.",
+            )
+        elif minimum_temperature <= 0 and humidity >= 70:
+            analysis = LlmAnalysis(
+                risk_level=RiskLevel.CRITICAL,
+                hazard=Hazard.BLIZZARD,
+                confidence_percent=94,
+                advice="Stay indoors, keep warm, and avoid outdoor travel.",
+                reason="Subzero temperature and high humidity indicate blizzard risk.",
+            )
+        elif vibration.peak_to_peak_raw >= 1500 or vibration.rms_raw >= 300:
+            analysis = LlmAnalysis(
+                risk_level=RiskLevel.CRITICAL,
+                hazard=Hazard.EARTHQUAKE,
+                confidence_percent=95,
+                advice="Move away from glass and falling objects; take cover now.",
+                reason="Vibration amplitude or energy exceeds the earthquake threshold.",
             )
         elif (water >= 85 or water_height >= 80) and vibration.peak_to_peak_raw >= 600:
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.CRITICAL,
                 hazard=Hazard.COMPOUND,
                 confidence_percent=95,
-                advice="Rời khu vực thấp và tránh công trình có rung động mạnh ngay lập tức.",
-                reason="Mực nước rất cao đồng thời rung động vượt ngưỡng nguy hiểm.",
+                advice="Leave low ground and unstable structures immediately.",
+                reason="Water is very high while vibration exceeds the danger threshold.",
             )
         elif water >= 85 or water_height >= 80:
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.CRITICAL,
                 hazard=Hazard.FLOOD,
                 confidence_percent=93,
-                advice="Di chuyển lên vị trí cao và ngắt nguồn điện khu vực ngập.",
-                reason="Mực nước đã vượt ngưỡng cảnh báo nghiêm trọng.",
+                advice="Move to higher ground and disconnect power in flooded areas.",
+                reason="The water level exceeds the critical flood threshold.",
             )
         elif vibration.peak_to_peak_raw >= 600 or vibration.rms_raw >= 100:
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.WARNING,
                 hazard=Hazard.ABNORMAL_VIBRATION,
                 confidence_percent=88,
-                advice="Tránh xa kết cấu không ổn định và theo dõi rung động.",
-                reason="Biên độ rung đo được cao hơn mức vận hành thông thường.",
+                advice="Avoid unstable structures and monitor vibration.",
+                reason="Measured vibration is above the normal operating range.",
             )
         elif wet >= 70 and humidity >= 80:
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.WARNING,
                 hazard=Hazard.HEAVY_RAIN,
                 confidence_percent=85,
-                advice="Theo dõi mực nước và hạn chế đi qua khu vực trũng.",
-                reason="Độ ẩm và độ ướt bề mặt cùng ở mức cao.",
+                advice="Monitor water levels and avoid low-lying areas.",
+                reason="Humidity and surface wetness are both high.",
             )
         else:
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.NORMAL,
                 hazard=Hazard.NONE,
                 confidence_percent=90,
-                advice="Tiếp tục theo dõi cảm biến theo chu kỳ bình thường.",
-                reason="Các chỉ số hiện chưa vượt ngưỡng cảnh báo.",
+                advice="Continue normal periodic sensor monitoring.",
+                reason="No measurement currently exceeds an alert threshold.",
             )
 
         return AnalysisResponse(
@@ -213,7 +243,7 @@ def unavailable_response(device_id: str, model: str) -> AnalysisResponse:
         risk_level=RiskLevel.UNKNOWN,
         hazard=Hazard.UNKNOWN,
         confidence_percent=0,
-        advice="Không thể phân tích dữ liệu lúc này; tiếp tục theo dõi cảm biến.",
-        reason="Dịch vụ LLM không khả dụng hoặc trả về dữ liệu không hợp lệ.",
+        advice="Analysis is unavailable; continue monitoring the sensors.",
+        reason="The LLM service is unavailable or returned invalid data.",
         outputs=output_for_risk(RiskLevel.UNKNOWN),
     )

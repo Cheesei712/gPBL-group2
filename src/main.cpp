@@ -1,7 +1,9 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
+#include <LiquidCrystal_I2C.h>
 #include <WiFi.h>
+#include <Wire.h>
 #include <math.h>
 
 #include "http_gateway.h"
@@ -20,32 +22,47 @@
 // SO DO CHAN - ESP32 DEV MODULE
 // ================================================================
 // DHT11 DATA       -> GPIO 4  (them dien tro keo len 10 kOhm neu cam bien roi)
-// HC-SR04 TRIG     -> GPIO 21
+// LCD I2C SDA/SCL  -> GPIO 21 / GPIO 22
+// HC-SR04 TRIG     -> GPIO 23 (GPIO 21 da danh cho I2C SDA)
 // HC-SR04 ECHO     -> GPIO 26 (BAT BUOC ha 5 V xuong 3.3 V bang cau chia ap)
 // LM35 OUT         -> GPIO 34 (ADC1, input only)
 // Steam/Rain AO    -> GPIO 35 (ADC1, input only, cap module bang 3.3 V)
 // Water level AO   -> GPIO 32 (ADC1, cap module bang 3.3 V)
-// KS0272 Vibration S -> GPIO 33 (ADC1, cap module bang 3.3 V)
-// RGB common cathode  -> R: GPIO 16, G: GPIO 17, B: GPIO 19
+// KS0272 Vibration S -> GPIO 36 (ADC1, input only, GPIO 33 da danh cho RGB Green)
+// RGB common VCC/anode -> R: GPIO 25, G: GPIO 33, B: GPIO 27 (active LOW)
 // Active buzzer       -> GPIO 18
 // Tat ca cac module phai noi chung GND voi ESP32.
 
 constexpr uint8_t DHT_PIN = 4;
-constexpr uint8_t HC_TRIG_PIN = 21;
+constexpr uint8_t I2C_SDA_PIN = 21;
+constexpr uint8_t I2C_SCL_PIN = 22;
+constexpr uint8_t HC_TRIG_PIN = 23;
 constexpr uint8_t HC_ECHO_PIN = 26;
 constexpr uint8_t LM35_PIN = 34;
 constexpr uint8_t STEAM_PIN = 35;
 constexpr uint8_t WATER_PIN = 32;
-constexpr uint8_t VIBRATION_PIN = 33;
-constexpr uint8_t RGB_RED_PIN = 16;
-constexpr uint8_t RGB_GREEN_PIN = 17;
-constexpr uint8_t RGB_BLUE_PIN = 19;
+constexpr uint8_t VIBRATION_PIN = 36;
+constexpr uint8_t RGB_RED_PIN = 25;
+constexpr uint8_t RGB_GREEN_PIN = 33;
+constexpr uint8_t RGB_BLUE_PIN = 27;
 constexpr uint8_t BUZZER_PIN = 18;
+constexpr uint8_t RGB_RED_PWM_CHANNEL = 0;
+constexpr uint8_t RGB_GREEN_PWM_CHANNEL = 1;
+constexpr uint8_t RGB_BLUE_PWM_CHANNEL = 2;
+constexpr uint16_t RGB_PWM_FREQUENCY_HZ = 5000;
+constexpr uint8_t RGB_PWM_RESOLUTION_BITS = 8;
+constexpr uint8_t RGB_FADE_STEP = 5;
+constexpr uint32_t RGB_FADE_INTERVAL_MS = 20;
+constexpr uint8_t LCD_I2C_ADDRESS = 0x27;
+constexpr uint8_t LCD_COLUMNS = 16;
+constexpr uint8_t LCD_ROWS = 2;
 
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t SAMPLE_INTERVAL_MS = 2000;
 // Mot phut/request du de cap nhat output ma khong gay tai khong can thiet cho server.
 constexpr uint32_t ANALYZE_INTERVAL_MS = 60000;
+constexpr uint32_t DEMO_SCENARIO_INTERVAL_MS = 15000;
+constexpr bool USE_VIRTUAL_LLM_DEMO = true;
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 10000;
 constexpr uint32_t ULTRASONIC_TIMEOUT_US = 30000;
 constexpr uint8_t ULTRASONIC_SAMPLE_COUNT = 5;
@@ -71,45 +88,145 @@ constexpr int WATER_FULL_RAW = 3000;
 
 DHT dht(DHT_PIN, DHT11);
 HttpGateway gateway(DEVICE_SERVER_URL, DEVICE_API_KEY);
+LiquidCrystal_I2C lcd(LCD_I2C_ADDRESS, LCD_COLUMNS, LCD_ROWS);
 
-enum class BuzzerState { OFF, BEEP, CONTINUOUS };
+class AdviceDisplay {
+ public:
+  void begin() {
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    lcd.init();
+    lcd.backlight();
+    writeLine(0, "gPBL LLM DEMO");
+    writeLine(1, "Waiting server");
+  }
+
+  void apply(const ServerAnalysis &analysis) {
+    title_ = analysis.riskLevel + " " + analysis.hazard;
+    message_ = asciiForLcd(analysis.advice);
+    if (message_.length() == 0) message_ = "No advice";
+    scrollOffset_ = 0;
+    lastScrollMs_ = 0;
+    writeLine(0, title_);
+    renderMessage();
+  }
+
+  void showScenario(const char *scenarioName) {
+    writeLine(0, "Sending demo");
+    writeLine(1, scenarioName);
+  }
+
+  void update() {
+    if (message_.length() <= LCD_COLUMNS) return;
+    const uint32_t now = millis();
+    if (lastScrollMs_ == 0 || now - lastScrollMs_ >= 180) {
+      lastScrollMs_ = now;
+      scrollOffset_ = (scrollOffset_ + 1) % (message_.length() + LCD_COLUMNS);
+      renderMessage();
+    }
+  }
+
+ private:
+  String asciiForLcd(const String &value) {
+    String result;
+    result.reserve(value.length());
+    for (size_t i = 0; i < value.length(); ++i) {
+      const uint8_t byte = static_cast<uint8_t>(value[i]);
+      if (byte >= 32 && byte <= 126) result += static_cast<char>(byte);
+      else if ((byte & 0xC0) != 0x80) result += '?';
+    }
+    return result;
+  }
+
+  void writeLine(uint8_t row, const String &text) {
+    lcd.setCursor(0, row);
+    String padded = text.substring(0, LCD_COLUMNS);
+    while (padded.length() < LCD_COLUMNS) padded += ' ';
+    lcd.print(padded);
+  }
+
+  void renderMessage() {
+    if (message_.length() <= LCD_COLUMNS) {
+      writeLine(1, message_);
+      return;
+    }
+    String loopText = message_;
+    for (uint8_t i = 0; i < LCD_COLUMNS; ++i) loopText += ' ';
+    String window;
+    window.reserve(LCD_COLUMNS);
+    for (uint8_t i = 0; i < LCD_COLUMNS; ++i) {
+      window += loopText[(scrollOffset_ + i) % loopText.length()];
+    }
+    writeLine(1, window);
+  }
+
+  String title_;
+  String message_;
+  size_t scrollOffset_ = 0;
+  uint32_t lastScrollMs_ = 0;
+};
+
+AdviceDisplay display;
+
+enum class BuzzerState { OFF, BEEP, URGENT_BEEP };
 
 class OutputController {
  public:
   void begin() {
-    pinMode(RGB_RED_PIN, OUTPUT);
-    pinMode(RGB_GREEN_PIN, OUTPUT);
-    pinMode(RGB_BLUE_PIN, OUTPUT);
+    ledcSetup(RGB_RED_PWM_CHANNEL, RGB_PWM_FREQUENCY_HZ, RGB_PWM_RESOLUTION_BITS);
+    ledcSetup(RGB_GREEN_PWM_CHANNEL, RGB_PWM_FREQUENCY_HZ, RGB_PWM_RESOLUTION_BITS);
+    ledcSetup(RGB_BLUE_PWM_CHANNEL, RGB_PWM_FREQUENCY_HZ, RGB_PWM_RESOLUTION_BITS);
+    ledcAttachPin(RGB_RED_PIN, RGB_RED_PWM_CHANNEL);
+    ledcAttachPin(RGB_GREEN_PIN, RGB_GREEN_PWM_CHANNEL);
+    ledcAttachPin(RGB_BLUE_PIN, RGB_BLUE_PWM_CHANNEL);
     pinMode(BUZZER_PIN, OUTPUT);
-    setRgb(false, false, true);  // Blue means waiting/unknown.
+    currentRed_ = targetRed_ = 0;
+    currentGreen_ = targetGreen_ = 0;
+    currentBlue_ = targetBlue_ = 255;  // Blue means waiting/unknown.
+    writeRgb();
     digitalWrite(BUZZER_PIN, LOW);
   }
 
   void apply(const ServerAnalysis &analysis) {
-    if (analysis.ledColor == "GREEN") setRgb(false, true, false);
-    else if (analysis.ledColor == "YELLOW") setRgb(true, true, false);
-    else if (analysis.ledColor == "RED") setRgb(true, false, false);
-    else setRgb(false, false, true);
+    const uint8_t confidence = constrain(analysis.confidencePercent, 0, 100);
+    if (analysis.ledColor == "GREEN") {
+      setRgbTarget(0, 255, 0);
+    } else if (analysis.ledColor == "YELLOW") {
+      // Higher-confidence warnings move from yellow toward orange.
+      setRgbTarget(128 + confidence * 127 / 100,
+                   255 - confidence * 100 / 100, 0);
+    } else if (analysis.ledColor == "RED") {
+      // Higher-confidence critical alerts move from orange-red to pure red.
+      setRgbTarget(255, (100 - confidence) * 2, 0);
+    } else {
+      setRgbTarget(0, 0, 255);
+    }
+    Serial.printf("RGB TARGET   | R=%u G=%u B=%u | fade~1s\n",
+                  targetRed_, targetGreen_, targetBlue_);
 
-    if (analysis.buzzerMode == "CONTINUOUS") buzzerState_ = BuzzerState::CONTINUOUS;
+    if (analysis.buzzerMode == "URGENT_BEEP") buzzerState_ = BuzzerState::URGENT_BEEP;
     else if (analysis.buzzerMode == "BEEP") buzzerState_ = BuzzerState::BEEP;
     else buzzerState_ = BuzzerState::OFF;
     lastToggleMs_ = millis();
-    buzzerOn_ = buzzerState_ == BuzzerState::CONTINUOUS;
+    lastLedToggleMs_ = millis();
+    buzzerOn_ = buzzerState_ != BuzzerState::OFF;
+    ledOn_ = true;
+    writeRgb();
     digitalWrite(BUZZER_PIN, buzzerOn_ ? HIGH : LOW);
   }
 
   void update() {
+    updateRgbFade();
+    updateLedBlink();
     if (buzzerState_ == BuzzerState::OFF) {
       digitalWrite(BUZZER_PIN, LOW);
       return;
     }
-    if (buzzerState_ == BuzzerState::CONTINUOUS) {
-      digitalWrite(BUZZER_PIN, HIGH);
-      return;
-    }
     const uint32_t now = millis();
-    const uint32_t duration = buzzerOn_ ? 200 : 800;
+    // Both alert levels use a repeating intermittent pattern at full GPIO level.
+    // CRITICAL uses longer ON and shorter OFF periods so it sounds more urgent.
+    const uint32_t onDuration = buzzerState_ == BuzzerState::URGENT_BEEP ? 500 : 300;
+    const uint32_t offDuration = buzzerState_ == BuzzerState::URGENT_BEEP ? 150 : 500;
+    const uint32_t duration = buzzerOn_ ? onDuration : offDuration;
     if (now - lastToggleMs_ >= duration) {
       buzzerOn_ = !buzzerOn_;
       lastToggleMs_ = now;
@@ -118,15 +235,69 @@ class OutputController {
   }
 
  private:
-  void setRgb(bool red, bool green, bool blue) {
-    digitalWrite(RGB_RED_PIN, red ? HIGH : LOW);
-    digitalWrite(RGB_GREEN_PIN, green ? HIGH : LOW);
-    digitalWrite(RGB_BLUE_PIN, blue ? HIGH : LOW);
+  static uint8_t approach(uint8_t current, uint8_t target) {
+    if (current < target) return min<int>(current + RGB_FADE_STEP, target);
+    if (current > target) return max<int>(current - RGB_FADE_STEP, target);
+    return current;
+  }
+
+  void setRgbTarget(uint8_t red, uint8_t green, uint8_t blue) {
+    targetRed_ = red;
+    targetGreen_ = green;
+    targetBlue_ = blue;
+  }
+
+  void updateRgbFade() {
+    const uint32_t now = millis();
+    if (now - lastFadeMs_ < RGB_FADE_INTERVAL_MS) return;
+    lastFadeMs_ = now;
+    currentRed_ = approach(currentRed_, targetRed_);
+    currentGreen_ = approach(currentGreen_, targetGreen_);
+    currentBlue_ = approach(currentBlue_, targetBlue_);
+    writeRgb();
+  }
+
+  void updateLedBlink() {
+    if (buzzerState_ == BuzzerState::OFF) {
+      if (!ledOn_) {
+        ledOn_ = true;
+        writeRgb();
+      }
+      return;
+    }
+    const uint32_t now = millis();
+    const uint32_t onDuration = buzzerState_ == BuzzerState::URGENT_BEEP ? 200 : 600;
+    const uint32_t offDuration = buzzerState_ == BuzzerState::URGENT_BEEP ? 120 : 400;
+    const uint32_t duration = ledOn_ ? onDuration : offDuration;
+    if (now - lastLedToggleMs_ >= duration) {
+      ledOn_ = !ledOn_;
+      lastLedToggleMs_ = now;
+      writeRgb();
+    }
+  }
+
+  void writeRgb() {
+    // Common anode: duty 255 is OFF and duty 0 is maximum brightness.
+    const uint8_t red = ledOn_ ? currentRed_ : 0;
+    const uint8_t green = ledOn_ ? currentGreen_ : 0;
+    const uint8_t blue = ledOn_ ? currentBlue_ : 0;
+    ledcWrite(RGB_RED_PWM_CHANNEL, 255 - red);
+    ledcWrite(RGB_GREEN_PWM_CHANNEL, 255 - green);
+    ledcWrite(RGB_BLUE_PWM_CHANNEL, 255 - blue);
   }
 
   BuzzerState buzzerState_ = BuzzerState::OFF;
   bool buzzerOn_ = false;
+  bool ledOn_ = true;
   uint32_t lastToggleMs_ = 0;
+  uint32_t lastLedToggleMs_ = 0;
+  uint32_t lastFadeMs_ = 0;
+  uint8_t currentRed_ = 0;
+  uint8_t currentGreen_ = 0;
+  uint8_t currentBlue_ = 0;
+  uint8_t targetRed_ = 0;
+  uint8_t targetGreen_ = 0;
+  uint8_t targetBlue_ = 0;
 };
 
 OutputController outputs;
@@ -157,6 +328,24 @@ struct SensorData {
   bool waterValid = false;
   bool vibrationValid = false;
 };
+
+enum class DemoScenario : uint8_t { EARTHQUAKE, FLOOD, BLIZZARD };
+
+constexpr DemoScenario DEMO_SCENARIOS[] = {
+    DemoScenario::EARTHQUAKE,
+    DemoScenario::FLOOD,
+    DemoScenario::BLIZZARD,
+};
+constexpr size_t DEMO_SCENARIO_COUNT = sizeof(DEMO_SCENARIOS) / sizeof(DEMO_SCENARIOS[0]);
+
+const char *demoScenarioName(DemoScenario scenario) {
+  switch (scenario) {
+    case DemoScenario::EARTHQUAKE: return "EARTHQUAKE";
+    case DemoScenario::FLOOD: return "FLOOD";
+    case DemoScenario::BLIZZARD: return "BLIZZARD";
+  }
+  return "UNKNOWN";
+}
 
 float clampFloat(float value, float minimum, float maximum) {
   return fminf(maximum, fmaxf(minimum, value));
@@ -347,32 +536,98 @@ String buildJsonPayload(const SensorData &data) {
   return payload;
 }
 
+String buildDemoPayload(DemoScenario scenario) {
+  JsonDocument document;
+  document["device_id"] = DEVICE_ID;
+  document["timestamp_ms"] = millis();
+  document["dht11"]["valid"] = true;
+  document["dht11"]["temperature_c"] = 27.0F;
+  document["dht11"]["humidity_percent"] = 55.0F;
+  document["lm35"]["valid"] = true;
+  document["lm35"]["temperature_c"] = 27.5F;
+  document["hc_sr04"]["valid"] = true;
+  document["hc_sr04"]["echo_time_us"] = 4100;
+  document["hc_sr04"]["distance_cm"] = 70.0F;
+  document["hc_sr04"]["water_height_cm"] = 30.0F;
+  document["steam_sensor"]["valid"] = true;
+  document["steam_sensor"]["adc_raw"] = 600;
+  document["steam_sensor"]["wet_percent"] = 20.0F;
+  document["water_sensor"]["valid"] = true;
+  document["water_sensor"]["adc_raw"] = 750;
+  document["water_sensor"]["level_percent"] = 25.0F;
+  document["ks0272_vibration"]["valid"] = true;
+  document["ks0272_vibration"]["current_raw"] = 1500;
+  document["ks0272_vibration"]["min_raw"] = 1460;
+  document["ks0272_vibration"]["max_raw"] = 1540;
+  document["ks0272_vibration"]["peak_to_peak_raw"] = 80;
+  document["ks0272_vibration"]["mean_raw"] = 1500.0F;
+  document["ks0272_vibration"]["rms_raw"] = 18.0F;
+  document["ks0272_vibration"]["event_count"] = 0;
+  document["ks0272_vibration"]["saturated"] = false;
+
+  switch (scenario) {
+    case DemoScenario::EARTHQUAKE:
+      document["ks0272_vibration"]["current_raw"] = 2300;
+      document["ks0272_vibration"]["min_raw"] = 500;
+      document["ks0272_vibration"]["max_raw"] = 3300;
+      document["ks0272_vibration"]["peak_to_peak_raw"] = 2800;
+      document["ks0272_vibration"]["mean_raw"] = 1550.0F;
+      document["ks0272_vibration"]["rms_raw"] = 480.0F;
+      document["ks0272_vibration"]["event_count"] = 42;
+      break;
+    case DemoScenario::FLOOD:
+      document["dht11"]["humidity_percent"] = 96.0F;
+      document["hc_sr04"]["echo_time_us"] = 580;
+      document["hc_sr04"]["distance_cm"] = 10.0F;
+      document["hc_sr04"]["water_height_cm"] = 90.0F;
+      document["steam_sensor"]["adc_raw"] = 2850;
+      document["steam_sensor"]["wet_percent"] = 95.0F;
+      document["water_sensor"]["adc_raw"] = 2850;
+      document["water_sensor"]["level_percent"] = 95.0F;
+      break;
+    case DemoScenario::BLIZZARD:
+      document["dht11"]["temperature_c"] = -12.0F;
+      document["dht11"]["humidity_percent"] = 92.0F;
+      document["lm35"]["temperature_c"] = -11.5F;
+      document["steam_sensor"]["adc_raw"] = 1800;
+      document["steam_sensor"]["wet_percent"] = 60.0F;
+      document["water_sensor"]["adc_raw"] = 300;
+      document["water_sensor"]["level_percent"] = 10.0F;
+      break;
+  }
+  document["all_sensors_valid"] = true;
+
+  String payload;
+  serializeJson(document, payload);
+  return payload;
+}
+
 void printReport(const SensorData &data, const String &payload) {
   Serial.println();
   Serial.println("============================================================");
-  Serial.printf("BAO CAO CAM BIEN | uptime: %lu ms\n", millis());
+  Serial.printf("SENSOR REPORT | uptime: %lu ms\n", millis());
   Serial.println("------------------------------------------------------------");
 
-  Serial.print("DHT11      | Nhiet do: ");
+  Serial.print("DHT11      | Temperature: ");
   printFloatOrError(data.dhtTemperatureC);
-  Serial.print(" C | Do am: ");
+  Serial.print(" C | Humidity: ");
   printFloatOrError(data.humidityPercent);
-  Serial.printf(" %% | %s\n", data.dhtValid ? "OK" : "LOI DOC");
+  Serial.printf(" %% | %s\n", data.dhtValid ? "OK" : "READ ERROR");
 
-  Serial.print("LM35       | Nhiet do: ");
+  Serial.print("LM35       | Temperature: ");
   printFloatOrError(data.lm35TemperatureC);
-  Serial.printf(" C | trung binh 32 mau ADC | %s\n", data.lm35Valid ? "OK" : "LOI DOC");
+  Serial.printf(" C | 32-sample ADC average | %s\n", data.lm35Valid ? "OK" : "READ ERROR");
 
-  Serial.printf("HC-SR04    | Echo: %lu us | Khoang cach: ", data.echoTimeUs);
+  Serial.printf("HC-SR04    | Echo: %lu us | Distance: ", data.echoTimeUs);
   printFloatOrError(data.ultrasonicDistanceCm);
-  Serial.print(" cm | Chieu cao nuoc: ");
+  Serial.print(" cm | Water height: ");
   printFloatOrError(data.waterHeightCm);
-  Serial.printf(" cm | %s\n", data.ultrasonicValid ? "OK" : "TIMEOUT/LOI");
+  Serial.printf(" cm | %s\n", data.ultrasonicValid ? "OK" : "TIMEOUT/ERROR");
 
-  Serial.printf("STEAM/RAIN | ADC raw: %d/4095 | Muc uot: %.1f %% | %s\n",
-                data.steamRaw, data.steamPercent, data.steamValid ? "OK" : "KET RAIL");
-  Serial.printf("WATER      | ADC raw: %d/4095 | Muc nuoc: %.1f %% | %s\n",
-                data.waterRaw, data.waterPercent, data.waterValid ? "OK" : "KET RAIL");
+  Serial.printf("STEAM/RAIN | ADC raw: %d/4095 | Wet level: %.1f %% | %s\n",
+                data.steamRaw, data.steamPercent, data.steamValid ? "OK" : "RAIL STUCK");
+  Serial.printf("WATER      | ADC raw: %d/4095 | Water level: %.1f %% | %s\n",
+                data.waterRaw, data.waterPercent, data.waterValid ? "OK" : "RAIL STUCK");
 
   Serial.printf("KS0272     | Raw: %d | Min/Max: %d/%d | Peak-to-peak: %d\n",
                 data.vibrationCurrentRaw, data.vibrationMinRaw,
@@ -380,18 +635,18 @@ void printReport(const SensorData &data, const String &payload) {
   Serial.printf("            | Mean: %.2f | RMS: %.2f | Events: %u | Saturated: %s | %s\n",
                 data.vibrationMeanRaw, data.vibrationRmsRaw,
                 data.vibrationEventCount, data.vibrationSaturated ? "YES" : "NO",
-                data.vibrationValid ? "OK" : "LOI DOC");
+                data.vibrationValid ? "OK" : "READ ERROR");
 
   Serial.println("------------------------------------------------------------");
-  Serial.printf("TRANG THAI  | Tat ca cam bien: %s\n",
-                allSensorsValid(data) ? "DOC THANH CONG" : "CO CAM BIEN LOI");
-  if (!data.dhtValid) Serial.println("KHUYEN CAO  | Kiem tra day DATA/nguon cua DHT11.");
-  if (!data.lm35Valid) Serial.println("KHUYEN CAO  | Kiem tra OUT/nguon va hieu chuan LM35.");
-  if (!data.ultrasonicValid) Serial.println("KHUYEN CAO  | Kiem tra HC-SR04 va cau chia ap chan ECHO.");
-  if (!data.steamValid) Serial.println("KHUYEN CAO  | STEAM cham rail cao; kiem tra AO/DO va dien ap tin hieu.");
-  if (!data.waterValid) Serial.println("KHUYEN CAO  | WATER cham rail cao; kiem tra AO/DO va dien ap tin hieu.");
-  if (!data.vibrationValid) Serial.println("KHUYEN CAO  | Kiem tra chan S/nguon cua KS0272.");
-  if (data.vibrationSaturated) Serial.println("KHUYEN CAO  | KS0272 cham tran ADC 4095; tin hieu rung dang bi cat dinh.");
+  Serial.printf("STATUS      | All sensors: %s\n",
+                allSensorsValid(data) ? "READ SUCCESS" : "SENSOR ERROR DETECTED");
+  if (!data.dhtValid) Serial.println("RECOMMEND   | Check the DHT11 DATA wire and power.");
+  if (!data.lm35Valid) Serial.println("RECOMMEND   | Check LM35 OUT/power and calibration.");
+  if (!data.ultrasonicValid) Serial.println("RECOMMEND   | Check HC-SR04 and the ECHO voltage divider.");
+  if (!data.steamValid) Serial.println("RECOMMEND   | STEAM is at the high ADC rail; check AO/DO and signal voltage.");
+  if (!data.waterValid) Serial.println("RECOMMEND   | WATER is at the high ADC rail; check AO/DO and signal voltage.");
+  if (!data.vibrationValid) Serial.println("RECOMMEND   | Check the KS0272 signal wire and power.");
+  if (data.vibrationSaturated) Serial.println("RECOMMEND   | KS0272 reached ADC 4095; vibration signal is clipping.");
   Serial.print("JSON_DATA: ");
   Serial.println(payload);
   Serial.println("============================================================");
@@ -424,13 +679,15 @@ void connectWifi() {
   }
 }
 
-void requestAnalysis(const String &payload) {
+bool requestAnalysis(const String &payload, const char *scenarioName) {
   ServerAnalysis analysis;
   String error;
+  display.showScenario(scenarioName);
   Serial.printf("POST %s\n", DEVICE_SERVER_URL);
   if (!gateway.analyze(payload, analysis, error)) {
     Serial.printf("SERVER ERROR | %s\n", error.c_str());
-    return;  // Keep the last known safe output state.
+    display.showScenario("SERVER ERROR");
+    return false;  // Keep the last known safe output state.
   }
 
   Serial.printf("SERVER RESULT | risk=%s | hazard=%s | confidence=%d%%\n",
@@ -441,6 +698,8 @@ void requestAnalysis(const String &payload) {
   Serial.printf("OUTPUTS       | LED=%s | buzzer=%s\n",
                 analysis.ledColor.c_str(), analysis.buzzerMode.c_str());
   outputs.apply(analysis);
+  display.apply(analysis);
+  return true;
 }
 
 void setup() {
@@ -459,21 +718,27 @@ void setup() {
 
   dht.begin();
   outputs.begin();
+  display.begin();
   connectWifi();
 
   Serial.println("\nESP32 MULTI-HAZARD SENSOR NODE");
   Serial.printf("Device ID: %s\n", DEVICE_ID);
-  Serial.printf("Serial: %lu baud | Chu ky: %lu ms\n", SERIAL_BAUD, SAMPLE_INTERVAL_MS);
-  Serial.printf("KS0272: GPIO %u | %u mau/cua so | threshold: %.0f ADC\n",
+  Serial.printf("Serial: %lu baud | Sample period: %lu ms\n", SERIAL_BAUD, SAMPLE_INTERVAL_MS);
+  Serial.printf("KS0272: GPIO %u | %u samples/window | threshold: %.0f ADC\n",
                 VIBRATION_PIN, VIBRATION_SAMPLE_COUNT, VIBRATION_EVENT_THRESHOLD_ADC);
-  Serial.println("Luu y: hay hieu chuan cac hang *_RAW va SENSOR_TO_BOTTOM_CM.");
+  Serial.printf("LLM demo: %s | %u scenarios | sent once per boot\n",
+                USE_VIRTUAL_LLM_DEMO ? "ON" : "OFF", DEMO_SCENARIO_COUNT);
+  Serial.println("NOTE: Calibrate all *_RAW constants and SENSOR_TO_BOTTOM_CM.");
 }
 
 void loop() {
   static uint32_t lastSampleMs = 0;
   static uint32_t lastAnalyzeMs = 0;
   static uint32_t lastWifiRetryMs = 0;
+  static size_t demoScenarioIndex = 0;
+  static bool demoCompleteReported = false;
   outputs.update();
+  display.update();
 
   const uint32_t now = millis();
   if (deviceConfigReady() && WiFi.status() != WL_CONNECTED &&
@@ -486,10 +751,25 @@ void loop() {
     const SensorData data = readAllSensors();
     const String payload = buildJsonPayload(data);
     printReport(data, payload);
-    if (WiFi.status() == WL_CONNECTED &&
-        (lastAnalyzeMs == 0 || now - lastAnalyzeMs >= ANALYZE_INTERVAL_MS)) {
-      lastAnalyzeMs = now;
-      requestAnalysis(payload);
+    if (WiFi.status() == WL_CONNECTED) {
+      if (USE_VIRTUAL_LLM_DEMO && demoScenarioIndex < DEMO_SCENARIO_COUNT &&
+          (lastAnalyzeMs == 0 || now - lastAnalyzeMs >= DEMO_SCENARIO_INTERVAL_MS)) {
+        lastAnalyzeMs = now;
+        const DemoScenario scenario = DEMO_SCENARIOS[demoScenarioIndex];
+        const String demoPayload = buildDemoPayload(scenario);
+        Serial.printf("DEMO SCENARIO | %s\n", demoScenarioName(scenario));
+        Serial.print("DEMO_DATA: ");
+        Serial.println(demoPayload);
+        if (requestAnalysis(demoPayload, demoScenarioName(scenario))) ++demoScenarioIndex;
+      } else if (!USE_VIRTUAL_LLM_DEMO &&
+                 (lastAnalyzeMs == 0 || now - lastAnalyzeMs >= ANALYZE_INTERVAL_MS)) {
+        lastAnalyzeMs = now;
+        requestAnalysis(payload, "REAL SENSORS");
+      } else if (USE_VIRTUAL_LLM_DEMO && demoScenarioIndex >= DEMO_SCENARIO_COUNT &&
+                 !demoCompleteReported) {
+        demoCompleteReported = true;
+        Serial.println("LLM DEMO COMPLETE | Reset ESP32 to run all 3 scenarios again.");
+      }
     }
   }
 }

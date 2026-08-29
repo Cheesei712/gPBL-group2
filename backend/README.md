@@ -52,7 +52,7 @@ LLM không tự tạo lệnh GPIO. Backend ánh xạ cố định:
 |---|---|---|
 | NORMAL | GREEN | OFF |
 | WARNING | YELLOW | BEEP |
-| CRITICAL | RED | CONTINUOUS |
+| CRITICAL | RED | URGENT_BEEP (500 ms on / 150 ms off) |
 | UNKNOWN | BLUE | OFF |
 
 ## Kiểm thử
@@ -70,4 +70,3 @@ ruff check .
 docker build -t gpbl-llm-backend .
 docker run --rm -p 8000:8000 --env-file .env gpbl-llm-backend
 ```
-

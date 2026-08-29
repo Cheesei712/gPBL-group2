@@ -69,6 +69,21 @@ def generate_telemetry(scenario: str, rng: random.Random) -> dict[str, Any]:
             rms_raw=rng.uniform(115, 180),
             event_count=rng.randint(8, 20),
         )
+    elif scenario == "earthquake":
+        data["ks0272_vibration"].update(
+            current_raw=2300,
+            min_raw=500,
+            max_raw=3300,
+            peak_to_peak_raw=2800,
+            mean_raw=1550.0,
+            rms_raw=480.0,
+            event_count=42,
+        )
+    elif scenario == "blizzard":
+        data["dht11"].update(temperature_c=-12.0, humidity_percent=92.0)
+        data["lm35"].update(temperature_c=-11.5)
+        data["steam_sensor"].update(adc_raw=1800, wet_percent=60.0)
+        data["water_sensor"].update(adc_raw=300, level_percent=10.0)
     elif scenario == "compound":
         data = generate_telemetry("flood", rng)
         vibration = generate_telemetry("vibration", rng)["ks0272_vibration"]
@@ -103,7 +118,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--scenario",
-        choices=["normal", "rain", "flood", "vibration", "compound", "sensor_error"],
+        choices=[
+            "normal",
+            "rain",
+            "flood",
+            "vibration",
+            "earthquake",
+            "blizzard",
+            "compound",
+            "sensor_error",
+        ],
         default="normal",
     )
     parser.add_argument("--url", default="http://127.0.0.1:8000/api/v1/analyze")
