@@ -13,11 +13,16 @@ class Settings(BaseSettings):
     )
 
     gemini_api_key: SecretStr = SecretStr("")
+    openrouter_api_key: SecretStr = SecretStr("")
     device_api_key: SecretStr
     gemini_model: str = "gemini-3.7-flash"
-    # Safe default: local rules do not consume Gemini tokens.
-    analysis_mode: Literal["gemini", "rules"] = "rules"
+    openrouter_model: str = "google/gemini-2.5-flash"
+
+
+    # Safe default: local rules do not consume LLM tokens.
+    analysis_mode: Literal["gemini", "openrouter", "rules"] = "rules"
     log_level: str = "INFO"
+
 
 
 @lru_cache

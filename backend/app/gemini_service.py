@@ -1,9 +1,11 @@
 import logging
 from typing import Protocol
 
+import httpx
 from google import genai
 from google.genai import types
 from pydantic import ValidationError
+
 
 from app.config import Settings
 from app.models import (
@@ -140,6 +142,86 @@ class GeminiService:
             reason=analysis.reason,
             outputs=output_for_risk(analysis.risk_level),
         )
+
+
+class OpenRouterService:
+    def __init__(self, settings: Settings) -> None:
+        self._model = settings.openrouter_model
+        api_key = settings.openrouter_api_key.get_secret_value()
+        if not api_key:
+            raise GeminiServiceError("OPENROUTER_API_KEY is required in openrouter mode")
+        self._api_key = api_key
+
+    async def analyze(self, telemetry: TelemetryRequest) -> AnalysisResponse:
+        prompt = (
+            "Evaluate the following IoT telemetry and return the exact JSON schema:\n"
+            f"{telemetry.model_dump_json(exclude_none=True)}"
+        )
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/Cheesei712/gPBL-group2",
+            "X-Title": "gPBL Disaster LLM Gateway",
+        }
+        openrouter_system = (
+            f"{SYSTEM_INSTRUCTION}\n\n"
+            "BẮT BUỘC trả về đúng duy nhất 1 JSON object có các trường sau:\n"
+            "{\n"
+            '  "risk_level": "NORMAL" | "WARNING" | "CRITICAL" | "UNKNOWN",\n'
+            '  "hazard": "NONE" | "FLOOD" | "HEAVY_RAIN" | "EXTREME_TEMPERATURE" | "ABNORMAL_VIBRATION" | "COMPOUND" | "SENSOR_ANOMALY" | "UNKNOWN",\n'
+            '  "confidence_percent": <integer 0..100>,\n'
+            '  "advice": "<Khuyến cáo ngắn gọn bằng tiếng Việt>",\n'
+            '  "reason": "<Lý do ngắn gọn bằng tiếng Việt>"\n'
+            "}"
+        )
+        body = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": openrouter_system},
+                {"role": "user", "content": prompt},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.1,
+            "max_tokens": 2048,
+        }
+
+
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json=body,
+                )
+                if response.status_code != 200:
+                    logger.error(
+                        "OpenRouter returned HTTP %d: %s",
+                        response.status_code,
+                        response.text,
+                    )
+                    raise GeminiServiceError(f"OpenRouter HTTP {response.status_code}")
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                analysis = LlmAnalysis.model_validate_json(content)
+        except (ValidationError, ValueError, TypeError, KeyError) as exc:
+            logger.exception("OpenRouter returned an invalid structured response")
+            raise GeminiServiceError("OpenRouter returned an invalid structured response") from exc
+        except Exception as exc:
+            logger.exception("OpenRouter request failed")
+            raise GeminiServiceError("OpenRouter request failed") from exc
+
+        return AnalysisResponse(
+            device_id=telemetry.device_id,
+            model=self._model,
+            risk_level=analysis.risk_level,
+            hazard=analysis.hazard,
+            confidence_percent=analysis.confidence_percent,
+            advice=analysis.advice,
+            reason=analysis.reason,
+            outputs=output_for_risk(analysis.risk_level),
+        )
+
 
 
 class RuleBasedService:
