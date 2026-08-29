@@ -53,6 +53,7 @@ constexpr uint16_t RGB_PWM_FREQUENCY_HZ = 5000;
 constexpr uint8_t RGB_PWM_RESOLUTION_BITS = 8;
 constexpr uint8_t RGB_FADE_STEP = 5;
 constexpr uint32_t RGB_FADE_INTERVAL_MS = 20;
+constexpr uint32_t STATUS_HOLD_MS = 700;
 constexpr uint8_t LCD_I2C_ADDRESS = 0x27;
 constexpr uint8_t LCD_COLUMNS = 16;
 constexpr uint8_t LCD_ROWS = 2;
@@ -96,8 +97,17 @@ class AdviceDisplay {
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     lcd.init();
     lcd.backlight();
-    writeLine(0, "gPBL LLM DEMO");
-    writeLine(1, "Waiting server");
+    showStatus("BOOTING ESP32", "Please wait...");
+  }
+
+  void showStatus(const String &line1, const String &line2) {
+    // Stop scrolling the previous advice while a connection status is displayed.
+    title_ = line1;
+    message_ = "";
+    scrollOffset_ = 0;
+    lastScrollMs_ = 0;
+    writeLine(0, line1);
+    writeLine(1, line2);
   }
 
   void apply(const ServerAnalysis &analysis) {
@@ -111,8 +121,7 @@ class AdviceDisplay {
   }
 
   void showScenario(const char *scenarioName) {
-    writeLine(0, "Sending demo");
-    writeLine(1, scenarioName);
+    showStatus("Preparing data", scenarioName);
   }
 
   void update() {
@@ -663,19 +672,26 @@ void connectWifi() {
   if (!deviceConfigReady()) {
     Serial.println("HTTP disabled: device_secrets.h is missing or still has placeholder values.");
     Serial.println("Copy include/device_secrets.example.h to include/device_secrets.h and edit it.");
+    display.showStatus("CONFIG ERROR", "Check secrets");
     return;
   }
   WiFi.mode(WIFI_STA);
   WiFi.begin(DEVICE_WIFI_SSID, DEVICE_WIFI_PASSWORD);
-  Serial.printf("Connecting WiFi to %s", DEVICE_WIFI_SSID);
+  display.showStatus("Connecting WiFi", DEVICE_WIFI_SSID);
+  Serial.printf("SYSTEM STATUS | Connecting to WiFi: %s", DEVICE_WIFI_SSID);
   for (uint8_t i = 0; i < 20 && WiFi.status() != WL_CONNECTED; ++i) {
     delay(500);
     Serial.print('.');
   }
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf(" connected, IP: %s\n", WiFi.localIP().toString().c_str());
+    const String ipAddress = WiFi.localIP().toString();
+    Serial.printf(" connected, IP: %s\n", ipAddress.c_str());
+    display.showStatus("WiFi connected", ipAddress);
+    delay(STATUS_HOLD_MS);
+    display.showStatus("Gemini API", "Ready to connect");
   } else {
     Serial.println(" not connected; firmware will retry.");
+    display.showStatus("WiFi failed", "Retry pending");
   }
 }
 
@@ -683,12 +699,20 @@ bool requestAnalysis(const String &payload, const char *scenarioName) {
   ServerAnalysis analysis;
   String error;
   display.showScenario(scenarioName);
+  delay(250);
+  display.showStatus("Connecting API", "Gemini...");
+  Serial.println("API STATUS    | Connecting to Gemini through backend");
   Serial.printf("POST %s\n", DEVICE_SERVER_URL);
   if (!gateway.analyze(payload, analysis, error)) {
     Serial.printf("SERVER ERROR | %s\n", error.c_str());
-    display.showScenario("SERVER ERROR");
+    Serial.println("API STATUS    | Gemini connection failed; retry pending");
+    display.showStatus("API failed", "Retry pending");
     return false;  // Keep the last known safe output state.
   }
+
+  Serial.println("API STATUS    | Gemini response received successfully");
+  display.showStatus("API connected", "Gemini online");
+  delay(STATUS_HOLD_MS);
 
   Serial.printf("SERVER RESULT | risk=%s | hazard=%s | confidence=%d%%\n",
                 analysis.riskLevel.c_str(), analysis.hazard.c_str(),
@@ -706,6 +730,12 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(1000);
 
+  display.begin();
+  Serial.println("SYSTEM STATUS | ESP32 boot started");
+  delay(STATUS_HOLD_MS);
+  display.showStatus("Initializing", "Sensors...");
+  Serial.println("SYSTEM STATUS | Initializing sensors");
+
   pinMode(HC_TRIG_PIN, OUTPUT);
   pinMode(HC_ECHO_PIN, INPUT);
   digitalWrite(HC_TRIG_PIN, LOW);
@@ -718,7 +748,9 @@ void setup() {
 
   dht.begin();
   outputs.begin();
-  display.begin();
+  display.showStatus("Outputs ready", "RGB + buzzer");
+  Serial.println("SYSTEM STATUS | Sensors and outputs initialized");
+  delay(STATUS_HOLD_MS);
   connectWifi();
 
   Serial.println("\nESP32 MULTI-HAZARD SENSOR NODE");
@@ -737,6 +769,7 @@ void loop() {
   static uint32_t lastWifiRetryMs = 0;
   static size_t demoScenarioIndex = 0;
   static bool demoCompleteReported = false;
+  static bool wifiWasConnected = WiFi.status() == WL_CONNECTED;
   outputs.update();
   display.update();
 
@@ -744,7 +777,21 @@ void loop() {
   if (deviceConfigReady() && WiFi.status() != WL_CONNECTED &&
       now - lastWifiRetryMs >= WIFI_RETRY_INTERVAL_MS) {
     lastWifiRetryMs = now;
+    display.showStatus("Reconnecting WiFi", DEVICE_WIFI_SSID);
+    Serial.println("SYSTEM STATUS | Retrying WiFi connection");
     WiFi.reconnect();
+  }
+  const bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  if (wifiConnected != wifiWasConnected) {
+    wifiWasConnected = wifiConnected;
+    if (wifiConnected) {
+      const String ipAddress = WiFi.localIP().toString();
+      Serial.printf("SYSTEM STATUS | WiFi restored, IP: %s\n", ipAddress.c_str());
+      display.showStatus("WiFi restored", ipAddress);
+    } else {
+      Serial.println("SYSTEM STATUS | WiFi connection lost");
+      display.showStatus("WiFi lost", "Retry pending");
+    }
   }
   if (lastSampleMs == 0 || now - lastSampleMs >= SAMPLE_INTERVAL_MS) {
     lastSampleMs = now;
