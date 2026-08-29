@@ -1,20 +1,19 @@
 # gPBL Disaster LLM Backend
 
-Backend nhận telemetry JSON từ ESP32, xác thực schema, gọi Gemini bằng structured output
-và trả về lời khuyên cùng lệnh LED/buzzer đã được ánh xạ cố định.
+The backend receives telemetry JSON from ESP32, validates the schema, calls Gemini using structured output, and returns advice alongside deterministically mapped LED/buzzer commands.
 
-## Luồng dữ liệu
+## Data Flow
 
 ```text
 ESP32 sensors -> POST /api/v1/analyze -> FastAPI -> Gemini
 ESP32 outputs <- validated JSON       <- FastAPI <- structured response
 ```
 
-Gemini API key chỉ nằm ở backend. ESP32 chỉ giữ `DEVICE_API_KEY` để gọi endpoint.
+The Gemini API key is kept strictly on the backend. The ESP32 only holds `DEVICE_API_KEY` to authenticate API endpoint calls.
 
-## Cài đặt
+## Installation
 
-Yêu cầu Python 3.11 trở lên.
+Requires Python 3.11 or higher.
 
 ```powershell
 cd backend
@@ -24,7 +23,7 @@ python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
 ```
 
-Điền `GEMINI_API_KEY` và một `DEVICE_API_KEY` dài, ngẫu nhiên vào `.env`, sau đó chạy:
+Enter `GEMINI_API_KEY` and a long, random `DEVICE_API_KEY` in `.env`, then run:
 
 ```powershell
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -32,7 +31,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 Swagger UI: `http://localhost:8000/docs`
 
-## Gọi thử endpoint
+## Testing the Endpoint
 
 ```powershell
 $headers = @{ "X-Device-Key" = "your-device-key" }
@@ -44,9 +43,9 @@ Invoke-RestMethod -Method Post `
   -Body $body
 ```
 
-## Quy tắc phần cứng
+## Hardware Rules
 
-LLM không tự tạo lệnh GPIO. Backend ánh xạ cố định:
+The LLM does not generate raw GPIO commands directly. The backend maps risk levels deterministically:
 
 | Risk | LED | Buzzer |
 |---|---|---|
@@ -55,9 +54,9 @@ LLM không tự tạo lệnh GPIO. Backend ánh xạ cố định:
 | CRITICAL | RED | URGENT_BEEP (500 ms on / 150 ms off) |
 | UNKNOWN | BLUE | OFF |
 
-## Kiểm thử
+## Testing
 
-Test không gọi Gemini thật:
+Run tests without calling the live Gemini API:
 
 ```powershell
 pytest
