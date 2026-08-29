@@ -6,6 +6,7 @@
 #include <Wire.h>
 #include <math.h>
 
+#include "firebase_gateway.h"
 #include "http_gateway.h"
 
 #if __has_include("device_secrets.h")
@@ -17,6 +18,15 @@
 #define DEVICE_SERVER_URL "http://192.168.1.100:8000/api/v1/analyze"
 #define DEVICE_API_KEY ""
 #endif
+
+#ifndef FIREBASE_URL
+#define FIREBASE_URL "https://gpbl-group2-default-rtdb.asia-southeast1.firebasedatabase.app"
+#endif
+
+#ifndef FIREBASE_AUTH
+#define FIREBASE_AUTH ""
+#endif
+
 
 // ================================================================
 // SO DO CHAN - ESP32 DEV MODULE
@@ -89,7 +99,9 @@ constexpr int WATER_FULL_RAW = 3000;
 
 DHT dht(DHT_PIN, DHT11);
 HttpGateway gateway(DEVICE_SERVER_URL, DEVICE_API_KEY);
+FirebaseGateway firebaseGateway(FIREBASE_URL, FIREBASE_AUTH, DEVICE_ID);
 LiquidCrystal_I2C lcd(LCD_I2C_ADDRESS, LCD_COLUMNS, LCD_ROWS);
+
 
 class AdviceDisplay {
  public:
@@ -668,6 +680,12 @@ bool deviceConfigReady() {
          strcmp(DEVICE_API_KEY, "replace-with-the-same-key-as-backend") != 0;
 }
 
+bool firebaseConfigReady() {
+  return strlen(FIREBASE_URL) > 0 &&
+         strcmp(FIREBASE_URL, "https://your-project-id.firebaseio.com") != 0;
+}
+
+
 void connectWifi() {
   if (!deviceConfigReady()) {
     Serial.println("HTTP disabled: device_secrets.h is missing or still has placeholder values.");
@@ -802,8 +820,17 @@ void loop() {
     const String payload = buildJsonPayload(data);
     printReport(data, payload);
     if (WiFi.status() == WL_CONNECTED) {
+      if (firebaseConfigReady()) {
+        String fbError;
+        if (firebaseGateway.pushTelemetry(payload, fbError)) {
+          Serial.println("FIREBASE RTDB | Telemetry pushed (overwritten latest data)");
+        } else {
+          Serial.printf("FIREBASE ERROR| %s\n", fbError.c_str());
+        }
+      }
       if (USE_VIRTUAL_LLM_DEMO && demoScenarioIndex < DEMO_SCENARIO_COUNT &&
           (lastAnalyzeMs == 0 || now - lastAnalyzeMs >= DEMO_SCENARIO_INTERVAL_MS)) {
+
         lastAnalyzeMs = now;
         const DemoScenario scenario = DEMO_SCENARIOS[demoScenarioIndex];
         const String demoPayload = buildDemoPayload(scenario);

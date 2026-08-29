@@ -1,0 +1,14 @@
+[
+  "tests/test_api.py::test_analyze_requires_device_key",
+  "tests/test_api.py::test_analyze_returns_validated_commands",
+  "tests/test_api.py::test_health",
+  "tests/test_rules.py::test_gemini_wire_schema_avoids_unsupported_additional_properties",
+  "tests/test_rules.py::test_rule_scenarios[blizzard-CRITICAL-BLIZZARD-RED-URGENT_BEEP]",
+  "tests/test_rules.py::test_rule_scenarios[compound-CRITICAL-COMPOUND-RED-URGENT_BEEP]",
+  "tests/test_rules.py::test_rule_scenarios[earthquake-CRITICAL-EARTHQUAKE-RED-URGENT_BEEP]",
+  "tests/test_rules.py::test_rule_scenarios[flood-CRITICAL-FLOOD-RED-URGENT_BEEP]",
+  "tests/test_rules.py::test_rule_scenarios[normal-NORMAL-NONE-GREEN-OFF]",
+  "tests/test_rules.py::test_rule_scenarios[rain-WARNING-HEAVY_RAIN-YELLOW-BEEP]",
+  "tests/test_rules.py::test_rule_scenarios[sensor_error-UNKNOWN-SENSOR_ANOMALY-BLUE-OFF]",
+  "tests/test_rules.py::test_rule_scenarios[vibration-WARNING-ABNORMAL_VIBRATION-YELLOW-BEEP]"
+]
