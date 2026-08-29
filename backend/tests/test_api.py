@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from app.config import get_settings
 from app.dependencies import get_analysis_service
 from app.main import app
 from app.models import (
@@ -58,7 +59,10 @@ def test_health() -> None:
     with TestClient(app) as client:
         response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "analysis_mode": "rules"}
+    assert response.json() == {
+        "status": "ok",
+        "analysis_mode": get_settings().analysis_mode,
+    }
 
 
 def test_analyze_requires_device_key() -> None:
