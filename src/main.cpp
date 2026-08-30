@@ -70,11 +70,10 @@ constexpr uint8_t LCD_ROWS = 2;
 
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t SAMPLE_INTERVAL_MS = 2000;
-// Mot phut/request du de cap nhat output ma khong gay tai khong can thiet cho server.
 constexpr uint32_t ANALYZE_INTERVAL_MS = 60000;
-constexpr uint32_t DEMO_SCENARIO_INTERVAL_MS = 15000;
-constexpr bool USE_VIRTUAL_LLM_DEMO = true;
+constexpr uint32_t FETCH_ALERT_INTERVAL_MS = 3000;
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 10000;
+
 constexpr uint32_t ULTRASONIC_TIMEOUT_US = 30000;
 constexpr uint8_t ULTRASONIC_SAMPLE_COUNT = 5;
 constexpr uint8_t ULTRASONIC_MIN_VALID_SAMPLES = 3;
@@ -130,10 +129,6 @@ class AdviceDisplay {
     lastScrollMs_ = 0;
     writeLine(0, title_);
     renderMessage();
-  }
-
-  void showScenario(const char *scenarioName) {
-    showStatus("Preparing data", scenarioName);
   }
 
   void update() {
@@ -350,24 +345,6 @@ struct SensorData {
   bool vibrationValid = false;
 };
 
-enum class DemoScenario : uint8_t { EARTHQUAKE, FLOOD, BLIZZARD };
-
-constexpr DemoScenario DEMO_SCENARIOS[] = {
-    DemoScenario::EARTHQUAKE,
-    DemoScenario::FLOOD,
-    DemoScenario::BLIZZARD,
-};
-constexpr size_t DEMO_SCENARIO_COUNT = sizeof(DEMO_SCENARIOS) / sizeof(DEMO_SCENARIOS[0]);
-
-const char *demoScenarioName(DemoScenario scenario) {
-  switch (scenario) {
-    case DemoScenario::EARTHQUAKE: return "EARTHQUAKE";
-    case DemoScenario::FLOOD: return "FLOOD";
-    case DemoScenario::BLIZZARD: return "BLIZZARD";
-  }
-  return "UNKNOWN";
-}
-
 float clampFloat(float value, float minimum, float maximum) {
   return fminf(maximum, fmaxf(minimum, value));
 }
@@ -557,72 +534,6 @@ String buildJsonPayload(const SensorData &data) {
   return payload;
 }
 
-String buildDemoPayload(DemoScenario scenario) {
-  JsonDocument document;
-  document["device_id"] = DEVICE_ID;
-  document["timestamp_ms"] = millis();
-  document["dht11"]["valid"] = true;
-  document["dht11"]["temperature_c"] = 27.0F;
-  document["dht11"]["humidity_percent"] = 55.0F;
-  document["lm35"]["valid"] = true;
-  document["lm35"]["temperature_c"] = 27.5F;
-  document["hc_sr04"]["valid"] = true;
-  document["hc_sr04"]["echo_time_us"] = 4100;
-  document["hc_sr04"]["distance_cm"] = 70.0F;
-  document["hc_sr04"]["water_height_cm"] = 30.0F;
-  document["steam_sensor"]["valid"] = true;
-  document["steam_sensor"]["adc_raw"] = 600;
-  document["steam_sensor"]["wet_percent"] = 20.0F;
-  document["water_sensor"]["valid"] = true;
-  document["water_sensor"]["adc_raw"] = 750;
-  document["water_sensor"]["level_percent"] = 25.0F;
-  document["ks0272_vibration"]["valid"] = true;
-  document["ks0272_vibration"]["current_raw"] = 1500;
-  document["ks0272_vibration"]["min_raw"] = 1460;
-  document["ks0272_vibration"]["max_raw"] = 1540;
-  document["ks0272_vibration"]["peak_to_peak_raw"] = 80;
-  document["ks0272_vibration"]["mean_raw"] = 1500.0F;
-  document["ks0272_vibration"]["rms_raw"] = 18.0F;
-  document["ks0272_vibration"]["event_count"] = 0;
-  document["ks0272_vibration"]["saturated"] = false;
-
-  switch (scenario) {
-    case DemoScenario::EARTHQUAKE:
-      document["ks0272_vibration"]["current_raw"] = 2300;
-      document["ks0272_vibration"]["min_raw"] = 500;
-      document["ks0272_vibration"]["max_raw"] = 3300;
-      document["ks0272_vibration"]["peak_to_peak_raw"] = 2800;
-      document["ks0272_vibration"]["mean_raw"] = 1550.0F;
-      document["ks0272_vibration"]["rms_raw"] = 480.0F;
-      document["ks0272_vibration"]["event_count"] = 42;
-      break;
-    case DemoScenario::FLOOD:
-      document["dht11"]["humidity_percent"] = 96.0F;
-      document["hc_sr04"]["echo_time_us"] = 580;
-      document["hc_sr04"]["distance_cm"] = 10.0F;
-      document["hc_sr04"]["water_height_cm"] = 90.0F;
-      document["steam_sensor"]["adc_raw"] = 2850;
-      document["steam_sensor"]["wet_percent"] = 95.0F;
-      document["water_sensor"]["adc_raw"] = 2850;
-      document["water_sensor"]["level_percent"] = 95.0F;
-      break;
-    case DemoScenario::BLIZZARD:
-      document["dht11"]["temperature_c"] = -12.0F;
-      document["dht11"]["humidity_percent"] = 92.0F;
-      document["lm35"]["temperature_c"] = -11.5F;
-      document["steam_sensor"]["adc_raw"] = 1800;
-      document["steam_sensor"]["wet_percent"] = 60.0F;
-      document["water_sensor"]["adc_raw"] = 300;
-      document["water_sensor"]["level_percent"] = 10.0F;
-      break;
-  }
-  document["all_sensors_valid"] = true;
-
-  String payload;
-  serializeJson(document, payload);
-  return payload;
-}
-
 void printReport(const SensorData &data, const String &payload) {
   Serial.println();
   Serial.println("============================================================");
@@ -713,11 +624,9 @@ void connectWifi() {
   }
 }
 
-bool requestAnalysis(const String &payload, const char *scenarioName) {
+bool requestAnalysis(const String &payload) {
   ServerAnalysis analysis;
   String error;
-  display.showScenario(scenarioName);
-  delay(250);
   display.showStatus("Connecting API", "Gemini...");
   Serial.println("API STATUS    | Connecting to Gemini through backend");
   Serial.printf("POST %s\n", DEVICE_SERVER_URL);
@@ -779,17 +688,12 @@ void setup() {
   Serial.printf("Serial: %lu baud | Sample period: %lu ms\n", SERIAL_BAUD, SAMPLE_INTERVAL_MS);
   Serial.printf("KS0272: GPIO %u | %u samples/window | threshold: %.0f ADC\n",
                 VIBRATION_PIN, VIBRATION_SAMPLE_COUNT, VIBRATION_EVENT_THRESHOLD_ADC);
-  Serial.printf("LLM demo: %s | %u scenarios | sent once per boot\n",
-                USE_VIRTUAL_LLM_DEMO ? "ON" : "OFF", DEMO_SCENARIO_COUNT);
   Serial.println("NOTE: Calibrate all *_RAW constants and SENSOR_TO_BOTTOM_CM.");
 }
 
 void loop() {
   static uint32_t lastSampleMs = 0;
-  static uint32_t lastAnalyzeMs = 0;
   static uint32_t lastWifiRetryMs = 0;
-  static size_t demoScenarioIndex = 0;
-  static bool demoCompleteReported = false;
   static bool wifiWasConnected = WiFi.status() == WL_CONNECTED;
   outputs.update();
   display.update();
@@ -819,35 +723,42 @@ void loop() {
     const SensorData data = readAllSensors();
     const String payload = buildJsonPayload(data);
     printReport(data, payload);
-    if (WiFi.status() == WL_CONNECTED) {
-      if (firebaseConfigReady()) {
-        String fbError;
-        if (firebaseGateway.pushTelemetry(payload, fbError)) {
-          Serial.println("FIREBASE RTDB | Telemetry pushed (overwritten latest data)");
-        } else {
-          Serial.printf("FIREBASE ERROR| %s\n", fbError.c_str());
-        }
+    if (WiFi.status() == WL_CONNECTED && firebaseConfigReady()) {
+      String fbError;
+      if (firebaseGateway.pushTelemetry(payload, fbError)) {
+        Serial.println("FIREBASE RTDB | Telemetry pushed (overwritten latest data)");
+      } else {
+        Serial.printf("FIREBASE ERROR| %s\n", fbError.c_str());
       }
-      if (USE_VIRTUAL_LLM_DEMO && demoScenarioIndex < DEMO_SCENARIO_COUNT &&
-          (lastAnalyzeMs == 0 || now - lastAnalyzeMs >= DEMO_SCENARIO_INTERVAL_MS)) {
+    }
+  }
 
-        lastAnalyzeMs = now;
-        const DemoScenario scenario = DEMO_SCENARIOS[demoScenarioIndex];
-        const String demoPayload = buildDemoPayload(scenario);
-        Serial.printf("DEMO SCENARIO | %s\n", demoScenarioName(scenario));
-        Serial.print("DEMO_DATA: ");
-        Serial.println(demoPayload);
-        if (requestAnalysis(demoPayload, demoScenarioName(scenario))) ++demoScenarioIndex;
-      } else if (!USE_VIRTUAL_LLM_DEMO &&
-                 (lastAnalyzeMs == 0 || now - lastAnalyzeMs >= ANALYZE_INTERVAL_MS)) {
-        lastAnalyzeMs = now;
-        requestAnalysis(payload, "REAL SENSORS");
-      } else if (USE_VIRTUAL_LLM_DEMO && demoScenarioIndex >= DEMO_SCENARIO_COUNT &&
-                 !demoCompleteReported) {
-        demoCompleteReported = true;
-        Serial.println("LLM DEMO COMPLETE | Reset ESP32 to run all 3 scenarios again.");
+  static uint32_t lastFetchAlertMs = 0;
+  static String lastRiskLevel = "";
+  static String lastHazard = "";
+
+  if (WiFi.status() == WL_CONNECTED && firebaseConfigReady() &&
+      (lastFetchAlertMs == 0 || now - lastFetchAlertMs >= FETCH_ALERT_INTERVAL_MS)) {
+    lastFetchAlertMs = now;
+    ServerAnalysis fbAnalysis;
+    String fbError;
+    if (firebaseGateway.fetchAnalysis(fbAnalysis, fbError)) {
+      if (fbAnalysis.riskLevel != lastRiskLevel || fbAnalysis.hazard != lastHazard) {
+        lastRiskLevel = fbAnalysis.riskLevel;
+        lastHazard = fbAnalysis.hazard;
+        Serial.println("\n============================================================");
+        Serial.printf("FIREBASE ALERT | risk=%s | hazard=%s | confidence=%d%%\n",
+                      fbAnalysis.riskLevel.c_str(), fbAnalysis.hazard.c_str(),
+                      fbAnalysis.confidencePercent);
+        Serial.printf("ADVICE         | %s\n", fbAnalysis.advice.c_str());
+        Serial.printf("OUTPUTS        | LED=%s | buzzer=%s\n",
+                      fbAnalysis.ledColor.c_str(), fbAnalysis.buzzerMode.c_str());
+        Serial.println("============================================================");
+        outputs.apply(fbAnalysis);
+        display.apply(fbAnalysis);
       }
     }
   }
 }
+
 

@@ -11,7 +11,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 BASE_TELEMETRY: dict[str, Any] = {
-    "device_id": "python-simulator-01",
+    "device_id": "esp32-node-01",
+
     "timestamp_ms": 0,
     "dht11": {"valid": True, "temperature_c": 29.0, "humidity_percent": 55.0},
     "lm35": {"valid": True, "temperature_c": 29.2},
@@ -131,8 +132,10 @@ def parse_args() -> argparse.Namespace:
         default="normal",
     )
     parser.add_argument("--url", default="http://127.0.0.1:8000/api/v1/analyze")
+    parser.add_argument("--device-id", default="esp32-node-01")
     parser.add_argument("--device-key", default="test-device-key")
     parser.add_argument("--count", type=int, default=1)
+
     parser.add_argument("--interval", type=float, default=2.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--print-only", action="store_true")

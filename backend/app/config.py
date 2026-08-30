@@ -19,9 +19,13 @@ class Settings(BaseSettings):
     openrouter_model: str = "google/gemini-2.5-flash"
 
 
+    firebase_url: str = "https://gpbl-group2-default-rtdb.asia-southeast1.firebasedatabase.app"
+    firebase_auth: SecretStr = SecretStr("lh3H7engPhQxhBJdvJEg4smwjmx4YSBTZufSFSlQ")
+
     # Safe default: local rules do not consume LLM tokens.
     analysis_mode: Literal["gemini", "openrouter", "rules"] = "rules"
     log_level: str = "INFO"
+
 
 
 
