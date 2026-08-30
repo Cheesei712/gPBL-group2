@@ -38,7 +38,7 @@
 // LM35 OUT         -> GPIO 34 (ADC1, input only)
 // Steam/Rain AO    -> GPIO 35 (ADC1, input only, cap module bang 3.3 V)
 // Water level AO   -> GPIO 32 (ADC1, cap module bang 3.3 V)
-// KS0272 Vibration S -> GPIO 36 (ADC1, input only, GPIO 33 da danh cho RGB Green)
+// Analog Piezoelectric Vibration S -> GPIO 36 (ADC1 / VP, input only)
 // RGB common VCC/anode -> R: GPIO 25, G: GPIO 33, B: GPIO 27 (active LOW)
 // Active buzzer       -> GPIO 18
 // Tat ca cac module phai noi chung GND voi ESP32.
@@ -561,7 +561,7 @@ void printReport(const SensorData &data, const String &payload) {
   Serial.printf("WATER      | ADC raw: %d/4095 | Water level: %.1f %% | %s\n",
                 data.waterRaw, data.waterPercent, data.waterValid ? "OK" : "RAIL STUCK");
 
-  Serial.printf("KS0272     | Raw: %d | Min/Max: %d/%d | Peak-to-peak: %d\n",
+  Serial.printf("PIEZO VIB  | Raw: %d | Min/Max: %d/%d | Peak-to-peak: %d\n",
                 data.vibrationCurrentRaw, data.vibrationMinRaw,
                 data.vibrationMaxRaw, data.vibrationPeakToPeak);
   Serial.printf("            | Mean: %.2f | RMS: %.2f | Events: %u | Saturated: %s | %s\n",
@@ -577,8 +577,8 @@ void printReport(const SensorData &data, const String &payload) {
   if (!data.ultrasonicValid) Serial.println("RECOMMEND   | Check HC-SR04 and the ECHO voltage divider.");
   if (!data.steamValid) Serial.println("RECOMMEND   | STEAM is at the high ADC rail; check AO/DO and signal voltage.");
   if (!data.waterValid) Serial.println("RECOMMEND   | WATER is at the high ADC rail; check AO/DO and signal voltage.");
-  if (!data.vibrationValid) Serial.println("RECOMMEND   | Check the KS0272 signal wire and power.");
-  if (data.vibrationSaturated) Serial.println("RECOMMEND   | KS0272 reached ADC 4095; vibration signal is clipping.");
+  if (!data.vibrationValid) Serial.println("RECOMMEND   | Check the Piezoelectric signal wire and power.");
+  if (data.vibrationSaturated) Serial.println("RECOMMEND   | Piezo reached ADC 4095; vibration signal is clipping.");
   Serial.print("JSON_DATA: ");
   Serial.println(payload);
   Serial.println("============================================================");
