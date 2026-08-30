@@ -85,9 +85,9 @@ constexpr float VIBRATION_EVENT_THRESHOLD_ADC = 80.0F;
 constexpr uint8_t ANALOG_SAMPLE_COUNT = 16;
 constexpr int ADC_HIGH_RAIL_THRESHOLD = 4090;
 
-// Khoang cach tu HC-SR04 den moc day khi khong co nuoc.
+// Khoang cach tu HC-SR04 den mat dat khi khong co tuyet (dung do do sau tuyet).
 // Can do thuc te va thay gia tri nay sau khi lap cam bien.
-constexpr float SENSOR_TO_BOTTOM_CM = 100.0F;
+constexpr float SENSOR_TO_GROUND_CM = 100.0F;
 
 // Hieu chuan ADC: ghi lai gia tri raw khi kho va khi uot/ngap toi da.
 // Tuy module, gia tri co the tang hoac giam khi uot. Ham mapPercent tu xu ly ca hai.
@@ -324,7 +324,7 @@ struct SensorData {
   float lm35TemperatureC = NAN;
   uint32_t echoTimeUs = 0;
   float ultrasonicDistanceCm = NAN;
-  float waterHeightCm = NAN;
+  float snowDepthCm = NAN;
   int steamRaw = 0;
   float steamPercent = 0.0F;
   int waterRaw = 0;
@@ -470,9 +470,9 @@ SensorData readAllSensors() {
     const float speedOfSoundMps = 331.3F + 0.606F * compensationTempC;
     data.ultrasonicDistanceCm = data.echoTimeUs * speedOfSoundMps / 20000.0F;
     if (data.ultrasonicDistanceCm >= ULTRASONIC_MIN_DISTANCE_CM &&
-        data.ultrasonicDistanceCm <= SENSOR_TO_BOTTOM_CM + 10.0F) {
-      data.waterHeightCm = clampFloat(SENSOR_TO_BOTTOM_CM - data.ultrasonicDistanceCm,
-                                      0.0F, SENSOR_TO_BOTTOM_CM);
+        data.ultrasonicDistanceCm <= SENSOR_TO_GROUND_CM + 10.0F) {
+      data.snowDepthCm = clampFloat(SENSOR_TO_GROUND_CM - data.ultrasonicDistanceCm,
+                                    0.0F, SENSOR_TO_GROUND_CM);
       data.ultrasonicValid = true;
     }
   }
@@ -511,7 +511,8 @@ String buildJsonPayload(const SensorData &data) {
   document["hc_sr04"]["valid"] = data.ultrasonicValid;
   document["hc_sr04"]["echo_time_us"] = data.echoTimeUs;
   document["hc_sr04"]["distance_cm"] = data.ultrasonicDistanceCm;
-  document["hc_sr04"]["water_height_cm"] = data.waterHeightCm;
+  document["hc_sr04"]["snow_height_cm"] = data.snowDepthCm;
+  document["hc_sr04"]["water_height_cm"] = data.snowDepthCm;
   document["steam_sensor"]["valid"] = data.steamValid;
   document["steam_sensor"]["adc_raw"] = data.steamRaw;
   document["steam_sensor"]["wet_percent"] = data.steamPercent;
@@ -552,13 +553,13 @@ void printReport(const SensorData &data, const String &payload) {
 
   Serial.printf("HC-SR04    | Echo: %lu us | Distance: ", data.echoTimeUs);
   printFloatOrError(data.ultrasonicDistanceCm);
-  Serial.print(" cm | Water height: ");
-  printFloatOrError(data.waterHeightCm);
+  Serial.print(" cm | Snow depth: ");
+  printFloatOrError(data.snowDepthCm);
   Serial.printf(" cm | %s\n", data.ultrasonicValid ? "OK" : "TIMEOUT/ERROR");
 
   Serial.printf("STEAM/RAIN | ADC raw: %d/4095 | Wet level: %.1f %% | %s\n",
                 data.steamRaw, data.steamPercent, data.steamValid ? "OK" : "RAIL STUCK");
-  Serial.printf("WATER      | ADC raw: %d/4095 | Water level: %.1f %% | %s\n",
+  Serial.printf("WATER      | ADC raw: %d/4095 | Water level (Flood): %.1f %% | %s\n",
                 data.waterRaw, data.waterPercent, data.waterValid ? "OK" : "RAIL STUCK");
 
   Serial.printf("PIEZO VIB  | Raw: %d | Min/Max: %d/%d | Peak-to-peak: %d\n",

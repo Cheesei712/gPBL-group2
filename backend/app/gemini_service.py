@@ -230,7 +230,7 @@ class RuleBasedService:
     async def analyze(self, telemetry: TelemetryRequest) -> AnalysisResponse:
         vibration = telemetry.ks0272_vibration
         water = telemetry.water_sensor.level_percent
-        water_height = telemetry.hc_sr04.water_height_cm or 0
+        snow_depth = telemetry.hc_sr04.snow_height_cm or 0
         wet = telemetry.steam_sensor.wet_percent
         humidity = telemetry.dht11.humidity_percent or 0
         temperatures = [
@@ -248,13 +248,15 @@ class RuleBasedService:
                 advice="Check the wiring and calibration of every failed sensor.",
                 reason="At least one sensor did not provide valid data.",
             )
-        elif minimum_temperature <= 0 and humidity >= 70:
+        elif (minimum_temperature <= 0 and humidity >= 70) or (
+            minimum_temperature <= 2 and snow_depth >= 15
+        ):
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.CRITICAL,
                 hazard=Hazard.BLIZZARD,
                 confidence_percent=94,
                 advice="Stay indoors, keep warm, and avoid outdoor travel.",
-                reason="Subzero temperature and high humidity indicate blizzard risk.",
+                reason="Subzero temperature, high humidity, or heavy snow accumulation detected.",
             )
         elif vibration.peak_to_peak_raw >= 1500 or vibration.rms_raw >= 300:
             analysis = LlmAnalysis(
@@ -264,21 +266,21 @@ class RuleBasedService:
                 advice="Move away from glass and falling objects; take cover now.",
                 reason="Vibration amplitude or energy exceeds the earthquake threshold.",
             )
-        elif (water >= 85 or water_height >= 80) and vibration.peak_to_peak_raw >= 600:
+        elif water >= 75 and vibration.peak_to_peak_raw >= 600:
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.CRITICAL,
                 hazard=Hazard.COMPOUND,
                 confidence_percent=95,
                 advice="Leave low ground and unstable structures immediately.",
-                reason="Water is very high while vibration exceeds the danger threshold.",
+                reason="Water level is very high while vibration exceeds the danger threshold.",
             )
-        elif water >= 85 or water_height >= 80:
+        elif water >= 75:
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.CRITICAL,
                 hazard=Hazard.FLOOD,
                 confidence_percent=93,
                 advice="Move to higher ground and disconnect power in flooded areas.",
-                reason="The water level exceeds the critical flood threshold.",
+                reason="Water sensor detected severe flood water level.",
             )
         elif vibration.peak_to_peak_raw >= 600 or vibration.rms_raw >= 100:
             analysis = LlmAnalysis(

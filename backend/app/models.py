@@ -24,6 +24,7 @@ class UltrasonicReading(StrictModel):
     echo_time_us: int = Field(ge=0)
     distance_cm: float | None = Field(default=None, ge=0)
     water_height_cm: float | None = Field(default=None, ge=0)
+    snow_height_cm: float | None = Field(default=None, ge=0)
 
 
 class SteamReading(StrictModel):
