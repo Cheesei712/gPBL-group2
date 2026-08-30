@@ -1,2 +1,0 @@
-"""Disaster assessment backend."""
-
