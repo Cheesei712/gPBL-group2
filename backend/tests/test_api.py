@@ -21,8 +21,9 @@ class FakeGeminiService:
             risk_level=RiskLevel.WARNING,
             hazard=Hazard.HEAVY_RAIN,
             confidence_percent=82,
-            advice="Theo dõi mực nước và tránh khu vực trũng.",
-            reason="Độ ẩm và tín hiệu bề mặt ướt đều cao.",
+            advice="Monitor water levels and stay away from low-lying areas.",
+            reason="High humidity and elevated surface moisture detected.",
+
             outputs=OutputCommand(led_color=LedColor.YELLOW, buzzer_mode=BuzzerMode.BEEP),
         )
 

@@ -421,28 +421,52 @@ def fetch_and_analyze():
     active_path = st.session_state.fb_path
 
     if st.session_state.sim_active:
-        active_path = "/devices/simulator/telemetry"
         sim_data = sim.generate_sensor_data(st.session_state.sim_scenario, st.session_state.sim_intensity)
-        fb.write_sensor_data(sim_data, active_path)
-        st.session_state.sim_push_count += 1
-
-    sensor = fb.get_sensor_data(active_path)
-    if sensor is None:
-        return None, None
-
-    if sensor.get("alert_level"):
-        assessment = {
-            "alert_level":   sensor.get("alert_level",  "NORMAL"),
-            "hazard_type":   sensor.get("hazard_type",  "NORMAL"),
-            "rgb_color":     sensor.get("rgb_color",    "GREEN"),
-            "buzzer_active": sensor.get("buzzer_active", False),
-            "lcd_message":   sensor.get("lcd_message",  "System normal."),
-            "confidence":    float(sensor.get("confidence", 1.0)),
-            "reasoning":     sensor.get("reasoning",   ""),
-            "source":        sensor.get("source",       "firebase"),
-        }
-    else:
+        sensor = fb._normalize(sim_data)
         assessment = _rule_based_assessment(sensor)
+        
+        # Build analysis payload for ESP32 and Firebase
+        analysis_payload = {
+            "risk_level": assessment.get("alert_level", "NORMAL"),
+            "hazard": assessment.get("hazard_type", "NORMAL"),
+            "confidence_percent": int(assessment.get("confidence", 1.0) * 100),
+            "advice": assessment.get("lcd_message", "System normal."),
+            "reason": assessment.get("reasoning", ""),
+            "outputs": {
+                "led_color": assessment.get("rgb_color", "GREEN"),
+                "buzzer_mode": "URGENT_BEEP" if assessment.get("alert_level") == "CRITICAL" else (
+                    "BEEP" if assessment.get("alert_level") == "WARNING" else "OFF"
+                )
+            }
+        }
+        
+        # Publish simulation state to Firebase so ESP32 enters simulation mode and stops real sensors
+        fb.set_simulation_state(
+            active=True,
+            scenario=st.session_state.sim_scenario,
+            telemetry=sim_data,
+            analysis=analysis_payload,
+            device_id="esp32-node-01"
+        )
+        st.session_state.sim_push_count += 1
+    else:
+        sensor = fb.get_sensor_data(active_path)
+        if sensor is None:
+            return None, None
+
+        if sensor.get("alert_level"):
+            assessment = {
+                "alert_level":   sensor.get("alert_level",  "NORMAL"),
+                "hazard_type":   sensor.get("hazard_type",  "NORMAL"),
+                "rgb_color":     sensor.get("rgb_color",    "GREEN"),
+                "buzzer_active": sensor.get("buzzer_active", False),
+                "lcd_message":   sensor.get("lcd_message",  "System normal."),
+                "confidence":    float(sensor.get("confidence", 1.0)),
+                "reasoning":     sensor.get("reasoning",   ""),
+                "source":        sensor.get("source",       "firebase"),
+            }
+        else:
+            assessment = _rule_based_assessment(sensor)
 
     import modules.data_store as store
     store.push(sensor, assessment)
@@ -1014,6 +1038,7 @@ with tab4:
             st.session_state.sim_active = False
             st.session_state.sim_push_count = 0
             st.session_state.sim_scenario = "normal"
+            fb.set_simulation_state(False, device_id="esp32-node-01")
             st.rerun()
 
 

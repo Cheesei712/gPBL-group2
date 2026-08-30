@@ -27,21 +27,20 @@
 #define FIREBASE_AUTH ""
 #endif
 
-
 // ================================================================
-// SO DO CHAN - ESP32 DEV MODULE
+// PIN MAP - ESP32 DEV MODULE
 // ================================================================
-// DHT11 DATA       -> GPIO 4  (them dien tro keo len 10 kOhm neu cam bien roi)
-// LCD I2C SDA/SCL  -> GPIO 21 / GPIO 22
-// HC-SR04 TRIG     -> GPIO 23 (GPIO 21 da danh cho I2C SDA)
-// HC-SR04 ECHO     -> GPIO 26 (BAT BUOC ha 5 V xuong 3.3 V bang cau chia ap)
-// LM35 OUT         -> GPIO 34 (ADC1, input only)
-// Steam/Rain AO    -> GPIO 35 (ADC1, input only, cap module bang 3.3 V)
-// Water level AO   -> GPIO 32 (ADC1, cap module bang 3.3 V)
-// Analog Piezoelectric Vibration S -> GPIO 36 (ADC1 / VP, input only)
-// RGB common VCC/anode -> R: GPIO 25, G: GPIO 33, B: GPIO 27 (active LOW)
-// Active buzzer       -> GPIO 18
-// Tat ca cac module phai noi chung GND voi ESP32.
+// DHT11 DATA             -> GPIO 4  (add 10 kOhm pull-up resistor if standalone sensor)
+// LCD I2C SDA/SCL        -> GPIO 21 / GPIO 22
+// HC-SR04 TRIG           -> GPIO 23 (GPIO 21 is reserved for I2C SDA)
+// HC-SR04 ECHO           -> GPIO 26 (MANDATORY: 5V to 3.3V voltage divider)
+// LM35 OUT               -> GPIO 34 (ADC1, input only)
+// Steam/Rain AO          -> GPIO 35 (ADC1, input only, power module with 3.3V)
+// Water level AO         -> GPIO 32 (ADC1, power module with 3.3V)
+// KS0272 Vibration S     -> GPIO 36 (ADC1, input only, GPIO 33 reserved for RGB Green)
+// RGB common VCC/anode   -> R: GPIO 25, G: GPIO 33, B: GPIO 27 (active LOW)
+// Active buzzer          -> GPIO 18
+// All modules must share common GND with ESP32.
 
 constexpr uint8_t DHT_PIN = 4;
 constexpr uint8_t I2C_SDA_PIN = 21;
@@ -79,18 +78,23 @@ constexpr uint8_t ULTRASONIC_SAMPLE_COUNT = 5;
 constexpr uint8_t ULTRASONIC_MIN_VALID_SAMPLES = 3;
 constexpr uint32_t ULTRASONIC_GAP_MS = 40;
 constexpr float ULTRASONIC_MIN_DISTANCE_CM = 2.0F;
-constexpr size_t VIBRATION_SAMPLE_COUNT = 250;
-constexpr uint32_t VIBRATION_SAMPLE_PERIOD_US = 1000; // Xap xi 1 kHz.
-constexpr float VIBRATION_EVENT_THRESHOLD_ADC = 80.0F;
+constexpr float ULTRASONIC_MAX_DISTANCE_CM = 400.0F;
+constexpr size_t VIBRATION_SAMPLE_COUNT = 400;
+
+
+constexpr uint32_t VIBRATION_SAMPLE_PERIOD_US = 200; // 5 kHz sampling rate to catch sharp piezoelectric pulses
+constexpr float VIBRATION_EVENT_THRESHOLD_ADC = 40.0F;
+
 constexpr uint8_t ANALOG_SAMPLE_COUNT = 16;
 constexpr int ADC_HIGH_RAIL_THRESHOLD = 4090;
 
-// Khoang cach tu HC-SR04 den mat dat khi khong co tuyet (dung do do sau tuyet).
-// Can do thuc te va thay gia tri nay sau khi lap cam bien.
+// Distance from HC-SR04 to ground surface (used for snow depth calculation).
+// Measure and calibrate this value after physical sensor installation.
 constexpr float SENSOR_TO_GROUND_CM = 100.0F;
 
-// Hieu chuan ADC: ghi lai gia tri raw khi kho va khi uot/ngap toi da.
-// Tuy module, gia tri co the tang hoac giam khi uot. Ham mapPercent tu xu ly ca hai.
+
+// ADC Calibration: recorded raw values when dry and when fully wet/submerged.
+// Depending on module hardware, values can increase or decrease when wet. mapPercent handles both.
 constexpr int STEAM_DRY_RAW = 0;
 constexpr int STEAM_WET_RAW = 3000;
 constexpr int WATER_EMPTY_RAW = 0;
@@ -100,7 +104,6 @@ DHT dht(DHT_PIN, DHT11);
 HttpGateway gateway(DEVICE_SERVER_URL, DEVICE_API_KEY);
 FirebaseGateway firebaseGateway(FIREBASE_URL, FIREBASE_AUTH, DEVICE_ID);
 LiquidCrystal_I2C lcd(LCD_I2C_ADDRESS, LCD_COLUMNS, LCD_ROWS);
-
 
 class AdviceDisplay {
  public:
@@ -112,7 +115,7 @@ class AdviceDisplay {
   }
 
   void showStatus(const String &line1, const String &line2) {
-    // Stop scrolling the previous advice while a connection status is displayed.
+    // Stop scrolling previous advice while connection status is displayed.
     title_ = line1;
     message_ = "";
     scrollOffset_ = 0;
@@ -197,7 +200,7 @@ class OutputController {
     pinMode(BUZZER_PIN, OUTPUT);
     currentRed_ = targetRed_ = 0;
     currentGreen_ = targetGreen_ = 0;
-    currentBlue_ = targetBlue_ = 255;  // Blue means waiting/unknown.
+    currentBlue_ = targetBlue_ = 255;  // Blue indicates standby/connecting.
     writeRgb();
     digitalWrite(BUZZER_PIN, LOW);
   }
@@ -238,8 +241,8 @@ class OutputController {
       return;
     }
     const uint32_t now = millis();
-    // Both alert levels use a repeating intermittent pattern at full GPIO level.
-    // CRITICAL uses longer ON and shorter OFF periods so it sounds more urgent.
+    // Both alert levels use repeating intermittent patterns at full GPIO level.
+    // URGENT_BEEP uses longer ON and shorter OFF intervals.
     const uint32_t onDuration = buzzerState_ == BuzzerState::URGENT_BEEP ? 500 : 300;
     const uint32_t offDuration = buzzerState_ == BuzzerState::URGENT_BEEP ? 150 : 500;
     const uint32_t duration = buzzerOn_ ? onDuration : offDuration;
@@ -324,8 +327,9 @@ struct SensorData {
   float lm35TemperatureC = NAN;
   uint32_t echoTimeUs = 0;
   float ultrasonicDistanceCm = NAN;
-  float snowDepthCm = NAN;
+  float snowHeightCm = NAN;
   int steamRaw = 0;
+
   float steamPercent = 0.0F;
   int waterRaw = 0;
   float waterPercent = 0.0F;
@@ -356,7 +360,7 @@ float mapPercent(int raw, int rawAtZero, int rawAtFull) {
 }
 
 void readCeramicVibration(SensorData &data) {
-  // Luu mot cua so mau de tinh bien do va RMS quanh gia tri nen cua cam bien.
+  // Capture a sampling window to calculate peak-to-peak and RMS around sensor baseline.
   uint16_t samples[VIBRATION_SAMPLE_COUNT];
   uint32_t sum = 0;
   int minimum = 4095;
@@ -391,9 +395,9 @@ void readCeramicVibration(SensorData &data) {
   data.vibrationMeanRaw = mean;
   data.vibrationRmsRaw = sqrtf(squaredDeviationSum / VIBRATION_SAMPLE_COUNT);
   data.vibrationEventCount = eventCount;
-  // KS0272 la tin hieu don cuc: raw=0 khi nghi la binh thuong, chi 4095 moi la cham tran.
+  // KS0272 is single-ended: raw=0 at rest is normal; only 4095 represents clipping.
   data.vibrationSaturated = maximum >= ADC_HIGH_RAIL_THRESHOLD;
-  data.vibrationValid = true; // analogRead da hoan tat du VIBRATION_SAMPLE_COUNT mau.
+  data.vibrationValid = true;
 }
 
 int readAveragedAdc(uint8_t pin) {
@@ -406,7 +410,7 @@ int readAveragedAdc(uint8_t pin) {
 }
 
 float readLm35Celsius() {
-  // Lay trung binh 32 mau de giam nhieu ADC.
+  // 32-sample average to suppress ADC noise.
   uint32_t totalMillivolts = 0;
   constexpr uint8_t SAMPLE_COUNT = 32;
   for (uint8_t i = 0; i < SAMPLE_COUNT; ++i) {
@@ -414,7 +418,7 @@ float readLm35Celsius() {
     delay(2);
   }
   const float averageMillivolts = totalMillivolts / static_cast<float>(SAMPLE_COUNT);
-  return averageMillivolts / 10.0F; // LM35: 10 mV / do C.
+  return averageMillivolts / 10.0F; // LM35: 10 mV / degree C.
 }
 
 uint32_t readUltrasonicEchoUs() {
@@ -436,7 +440,7 @@ uint32_t readMedianUltrasonicEchoUs() {
   }
   if (validCount < ULTRASONIC_MIN_VALID_SAMPLES) return 0;
 
-  // Sap xep mang nho de lay median, loai bo cac echo le do phan xa sai.
+  // Insertion sort for median filter to reject spurious reflections.
   for (uint8_t i = 1; i < validCount; ++i) {
     const uint32_t value = samples[i];
     int8_t j = static_cast<int8_t>(i) - 1;
@@ -457,11 +461,11 @@ SensorData readAllSensors() {
   data.dhtValid = !isnan(data.dhtTemperatureC) && !isnan(data.humidityPercent);
 
   data.lm35TemperatureC = readLm35Celsius();
-  // LM35 noi truc tiep chi do duoc tu 0 C; gioi han tren de bat loi day/ADC ro rang.
+  // Direct LM35 measures from 0 C up; upper bound validates wiring.
   data.lm35Valid = !isnan(data.lm35TemperatureC) &&
                    data.lm35TemperatureC >= 0.0F && data.lm35TemperatureC <= 150.0F;
 
-  // Uu tien LM35 cho bu toc van toc am; neu LM35 loi thi dung DHT11.
+  // Prioritize LM35 for speed-of-sound compensation; fall back to DHT11 if LM35 fails.
   const float compensationTempC = data.lm35Valid
                                       ? data.lm35TemperatureC
                                       : data.dhtTemperatureC;
@@ -470,16 +474,20 @@ SensorData readAllSensors() {
     const float speedOfSoundMps = 331.3F + 0.606F * compensationTempC;
     data.ultrasonicDistanceCm = data.echoTimeUs * speedOfSoundMps / 20000.0F;
     if (data.ultrasonicDistanceCm >= ULTRASONIC_MIN_DISTANCE_CM &&
-        data.ultrasonicDistanceCm <= SENSOR_TO_GROUND_CM + 10.0F) {
-      data.snowDepthCm = clampFloat(SENSOR_TO_GROUND_CM - data.ultrasonicDistanceCm,
-                                    0.0F, SENSOR_TO_GROUND_CM);
+        data.ultrasonicDistanceCm <= ULTRASONIC_MAX_DISTANCE_CM) {
       data.ultrasonicValid = true;
+      if (data.ultrasonicDistanceCm >= SENSOR_TO_GROUND_CM) {
+        data.snowHeightCm = 0.0F;
+      } else {
+        data.snowHeightCm = clampFloat(SENSOR_TO_GROUND_CM - data.ultrasonicDistanceCm,
+                                       0.0F, SENSOR_TO_GROUND_CM);
+      }
     }
+
   }
 
   data.steamRaw = readAveragedAdc(STEAM_PIN);
   data.steamPercent = mapPercent(data.steamRaw, STEAM_DRY_RAW, STEAM_WET_RAW);
-  // 0 co the la trang thai kho; 4095 lien tuc la cham rail/nham chan DO hoac qua ap.
   data.steamValid = data.steamRaw >= 0 && data.steamRaw < ADC_HIGH_RAIL_THRESHOLD;
   data.waterRaw = readAveragedAdc(WATER_PIN);
   data.waterPercent = mapPercent(data.waterRaw, WATER_EMPTY_RAW, WATER_FULL_RAW);
@@ -511,8 +519,7 @@ String buildJsonPayload(const SensorData &data) {
   document["hc_sr04"]["valid"] = data.ultrasonicValid;
   document["hc_sr04"]["echo_time_us"] = data.echoTimeUs;
   document["hc_sr04"]["distance_cm"] = data.ultrasonicDistanceCm;
-  document["hc_sr04"]["snow_height_cm"] = data.snowDepthCm;
-  document["hc_sr04"]["water_height_cm"] = data.snowDepthCm;
+  document["hc_sr04"]["snow_height_cm"] = data.snowHeightCm;
   document["steam_sensor"]["valid"] = data.steamValid;
   document["steam_sensor"]["adc_raw"] = data.steamRaw;
   document["steam_sensor"]["wet_percent"] = data.steamPercent;
@@ -541,28 +548,29 @@ void printReport(const SensorData &data, const String &payload) {
   Serial.printf("SENSOR REPORT | uptime: %lu ms\n", millis());
   Serial.println("------------------------------------------------------------");
 
-  Serial.print("DHT11      | Temperature: ");
+  Serial.print("DHT11          | Temperature: ");
   printFloatOrError(data.dhtTemperatureC);
   Serial.print(" C | Humidity: ");
   printFloatOrError(data.humidityPercent);
   Serial.printf(" %% | %s\n", data.dhtValid ? "OK" : "READ ERROR");
 
-  Serial.print("LM35       | Temperature: ");
+  Serial.print("LM35           | Temperature: ");
   printFloatOrError(data.lm35TemperatureC);
   Serial.printf(" C | 32-sample ADC average | %s\n", data.lm35Valid ? "OK" : "READ ERROR");
 
-  Serial.printf("HC-SR04    | Echo: %lu us | Distance: ", data.echoTimeUs);
+  Serial.printf("HC-SR04 (SNOW) | Echo: %lu us | Distance: ", data.echoTimeUs);
   printFloatOrError(data.ultrasonicDistanceCm);
   Serial.print(" cm | Snow depth: ");
-  printFloatOrError(data.snowDepthCm);
+  printFloatOrError(data.snowHeightCm);
   Serial.printf(" cm | %s\n", data.ultrasonicValid ? "OK" : "TIMEOUT/ERROR");
 
-  Serial.printf("STEAM/RAIN | ADC raw: %d/4095 | Wet level: %.1f %% | %s\n",
+  Serial.printf("STEAM/RAIN     | ADC raw: %d/4095 | Wet level: %.1f %% | %s\n",
                 data.steamRaw, data.steamPercent, data.steamValid ? "OK" : "RAIL STUCK");
-  Serial.printf("WATER      | ADC raw: %d/4095 | Water level (Flood): %.1f %% | %s\n",
+  Serial.printf("WATER (FLOOD)  | ADC raw: %d/4095 | Water level: %.1f %% | %s\n",
                 data.waterRaw, data.waterPercent, data.waterValid ? "OK" : "RAIL STUCK");
 
-  Serial.printf("PIEZO VIB  | Raw: %d | Min/Max: %d/%d | Peak-to-peak: %d\n",
+
+  Serial.printf("KS0272     | Raw: %d | Min/Max: %d/%d | Peak-to-peak: %d\n",
                 data.vibrationCurrentRaw, data.vibrationMinRaw,
                 data.vibrationMaxRaw, data.vibrationPeakToPeak);
   Serial.printf("            | Mean: %.2f | RMS: %.2f | Events: %u | Saturated: %s | %s\n",
@@ -578,8 +586,8 @@ void printReport(const SensorData &data, const String &payload) {
   if (!data.ultrasonicValid) Serial.println("RECOMMEND   | Check HC-SR04 and the ECHO voltage divider.");
   if (!data.steamValid) Serial.println("RECOMMEND   | STEAM is at the high ADC rail; check AO/DO and signal voltage.");
   if (!data.waterValid) Serial.println("RECOMMEND   | WATER is at the high ADC rail; check AO/DO and signal voltage.");
-  if (!data.vibrationValid) Serial.println("RECOMMEND   | Check the Piezoelectric signal wire and power.");
-  if (data.vibrationSaturated) Serial.println("RECOMMEND   | Piezo reached ADC 4095; vibration signal is clipping.");
+  if (!data.vibrationValid) Serial.println("RECOMMEND   | Check the KS0272 signal wire and power.");
+  if (data.vibrationSaturated) Serial.println("RECOMMEND   | KS0272 reached ADC 4095; vibration signal is clipping.");
   Serial.print("JSON_DATA: ");
   Serial.println(payload);
   Serial.println("============================================================");
@@ -596,7 +604,6 @@ bool firebaseConfigReady() {
   return strlen(FIREBASE_URL) > 0 &&
          strcmp(FIREBASE_URL, "https://your-project-id.firebaseio.com") != 0;
 }
-
 
 void connectWifi() {
   if (!deviceConfigReady()) {
@@ -625,20 +632,31 @@ void connectWifi() {
   }
 }
 
+bool isEmergencyTelemetry(const SensorData &data) {
+  const bool earthquake = data.vibrationValid &&
+                          (data.vibrationPeakToPeak >= 1000 || data.vibrationRmsRaw >= 200.0F);
+  const bool flood = data.waterValid && data.waterPercent >= 75.0F;
+  const bool blizzard = data.ultrasonicValid && data.snowHeightCm >= 15.0F &&
+                        (!isnan(data.lm35TemperatureC) && data.lm35TemperatureC <= 2.0F);
+  const bool heavyRain = data.steamValid && data.steamPercent >= 75.0F;
+  return earthquake || flood || blizzard || heavyRain;
+}
+
 bool requestAnalysis(const String &payload) {
+
   ServerAnalysis analysis;
   String error;
-  display.showStatus("Connecting API", "Gemini...");
-  Serial.println("API STATUS    | Connecting to Gemini through backend");
+  display.showStatus("Connecting API", "Analyzing...");
+  Serial.println("API STATUS    | Sending real sensor data to backend");
   Serial.printf("POST %s\n", DEVICE_SERVER_URL);
   if (!gateway.analyze(payload, analysis, error)) {
-    Serial.printf("SERVER ERROR | %s\n", error.c_str());
-    Serial.println("API STATUS    | Gemini connection failed; retry pending");
+    Serial.printf("SERVER ERROR  | %s\n", error.c_str());
+    Serial.println("API STATUS    | Connection failed; retry pending");
     display.showStatus("API failed", "Retry pending");
-    return false;  // Keep the last known safe output state.
+    return false;
   }
 
-  Serial.println("API STATUS    | Gemini response received successfully");
+  Serial.println("API STATUS    | Backend response received successfully");
   display.showStatus("API connected", "Gemini online");
   delay(STATUS_HOLD_MS);
 
@@ -668,14 +686,20 @@ void setup() {
   pinMode(HC_ECHO_PIN, INPUT);
   digitalWrite(HC_TRIG_PIN, LOW);
 
+  pinMode(LM35_PIN, INPUT);
+  pinMode(STEAM_PIN, INPUT);
+  pinMode(WATER_PIN, INPUT);
+  pinMode(VIBRATION_PIN, INPUT);
+
   pinMode(BUZZER_PIN, OUTPUT);
-  digitalWrite(BUZZER_PIN, HIGH); // Phat coi buzzer lien tuc
+  digitalWrite(BUZZER_PIN, HIGH);
 
   analogReadResolution(12);
   analogSetPinAttenuation(LM35_PIN, ADC_11db);
   analogSetPinAttenuation(STEAM_PIN, ADC_11db);
   analogSetPinAttenuation(WATER_PIN, ADC_11db);
   analogSetPinAttenuation(VIBRATION_PIN, ADC_11db);
+
 
   dht.begin();
   outputs.begin();
@@ -684,18 +708,27 @@ void setup() {
   delay(STATUS_HOLD_MS);
   connectWifi();
 
-  Serial.println("\nESP32 MULTI-HAZARD SENSOR NODE");
+  Serial.println("\nESP32 MULTI-HAZARD SENSOR NODE (REAL SENSOR MODE)");
   Serial.printf("Device ID: %s\n", DEVICE_ID);
   Serial.printf("Serial: %lu baud | Sample period: %lu ms\n", SERIAL_BAUD, SAMPLE_INTERVAL_MS);
   Serial.printf("KS0272: GPIO %u | %u samples/window | threshold: %.0f ADC\n",
                 VIBRATION_PIN, VIBRATION_SAMPLE_COUNT, VIBRATION_EVENT_THRESHOLD_ADC);
-  Serial.println("NOTE: Calibrate all *_RAW constants and SENSOR_TO_BOTTOM_CM.");
+  Serial.println("NOTE: Calibrate all *_RAW constants and SENSOR_TO_GROUND_CM.");
 }
+
 
 void loop() {
   static uint32_t lastSampleMs = 0;
+  static uint32_t lastAnalyzeMs = 0;
   static uint32_t lastWifiRetryMs = 0;
+  static uint32_t lastFetchAlertMs = 0;
+  static uint32_t lastFetchSimMs = 0;
+  static String lastRiskLevel = "";
+  static String lastHazard = "";
+  static bool wasSimActive = false;
+  static String lastSimScenario = "";
   static bool wifiWasConnected = WiFi.status() == WL_CONNECTED;
+
   outputs.update();
   display.update();
 
@@ -707,6 +740,7 @@ void loop() {
     Serial.println("SYSTEM STATUS | Retrying WiFi connection");
     WiFi.reconnect();
   }
+
   const bool wifiConnected = WiFi.status() == WL_CONNECTED;
   if (wifiConnected != wifiWasConnected) {
     wifiWasConnected = wifiConnected;
@@ -719,25 +753,90 @@ void loop() {
       display.showStatus("WiFi lost", "Retry pending");
     }
   }
+
+  // 0. Check Simulation Mode from Firebase Realtime Database
+  static bool isSimActive = false;
+  static SimulationState simState;
+  if (WiFi.status() == WL_CONNECTED && firebaseConfigReady() &&
+      (lastFetchSimMs == 0 || now - lastFetchSimMs >= 1500)) {
+    lastFetchSimMs = now;
+    String simErr;
+    if (firebaseGateway.fetchSimulation(simState, simErr)) {
+      isSimActive = simState.active;
+      if (isSimActive) {
+        if (!wasSimActive || simState.scenario != lastSimScenario ||
+            simState.analysis.riskLevel != lastRiskLevel || simState.analysis.hazard != lastHazard) {
+          wasSimActive = true;
+          lastSimScenario = simState.scenario;
+          lastRiskLevel = simState.analysis.riskLevel;
+          lastHazard = simState.analysis.hazard;
+
+          Serial.println("\n============================================================");
+          Serial.printf("SIMULATION MODE ACTIVE | Scenario: %s\n", simState.scenario.c_str());
+          Serial.println("Physical sensor reading SUSPENDED. Applying simulation outputs.");
+          Serial.printf("SIM ALERT | risk=%s | hazard=%s | confidence=%d%%\n",
+                        simState.analysis.riskLevel.c_str(), simState.analysis.hazard.c_str(),
+                        simState.analysis.confidencePercent);
+          Serial.printf("ADVICE    | %s\n", simState.analysis.advice.c_str());
+          Serial.printf("OUTPUTS   | LED=%s | buzzer=%s\n",
+                        simState.analysis.ledColor.c_str(), simState.analysis.buzzerMode.c_str());
+          Serial.println("============================================================");
+
+          outputs.apply(simState.analysis);
+          display.apply(simState.analysis);
+        }
+      } else if (wasSimActive) {
+        wasSimActive = false;
+        lastRiskLevel = "";
+        lastHazard = "";
+        Serial.println("\n============================================================");
+        Serial.println("SIMULATION STOPPED | Resuming real physical sensor acquisition.");
+        Serial.println("============================================================");
+        display.showStatus("REAL SENSOR MODE", "Resumed reading");
+      }
+    }
+  }
+
+  // If Simulation Mode is active, SKIP reading physical sensors and SKIP pushing to Firebase
+  if (isSimActive) {
+    return;
+  }
+
+  // 1. Read real sensor telemetry and push to Firebase & Backend (Real Hardware Mode)
   if (lastSampleMs == 0 || now - lastSampleMs >= SAMPLE_INTERVAL_MS) {
     lastSampleMs = now;
     const SensorData data = readAllSensors();
     const String payload = buildJsonPayload(data);
     printReport(data, payload);
-    if (WiFi.status() == WL_CONNECTED && firebaseConfigReady()) {
-      String fbError;
-      if (firebaseGateway.pushTelemetry(payload, fbError)) {
-        Serial.println("FIREBASE RTDB | Telemetry pushed (overwritten latest data)");
-      } else {
-        Serial.printf("FIREBASE ERROR| %s\n", fbError.c_str());
+
+    if (WiFi.status() == WL_CONNECTED) {
+      // Push real telemetry to Firebase Realtime Database
+      if (firebaseConfigReady()) {
+        String fbError;
+        if (firebaseGateway.pushTelemetry(payload, fbError)) {
+          Serial.println("FIREBASE RTDB | Real telemetry pushed (overwritten latest data)");
+        } else {
+          Serial.printf("FIREBASE ERROR| %s\n", fbError.c_str());
+        }
+      }
+
+      // Request AI assessment: trigger IMMEDIATELY on emergency event, or periodically every ANALYZE_INTERVAL_MS
+      const bool isEmergency = isEmergencyTelemetry(data);
+      constexpr uint32_t EMERGENCY_COOLDOWN_MS = 3000;
+      const bool canTriggerEmergency = isEmergency && (now - lastAnalyzeMs >= EMERGENCY_COOLDOWN_MS);
+      const bool timeToAnalyze = (lastAnalyzeMs == 0 || now - lastAnalyzeMs >= ANALYZE_INTERVAL_MS);
+
+      if (canTriggerEmergency || timeToAnalyze) {
+        lastAnalyzeMs = now;
+        if (isEmergency) {
+          Serial.println("EMERGENCY EVENT | Immediate hazard spike detected! Triggering instant AI analysis.");
+        }
+        requestAnalysis(payload);
       }
     }
   }
 
-  static uint32_t lastFetchAlertMs = 0;
-  static String lastRiskLevel = "";
-  static String lastHazard = "";
-
+  // 2. Fetch latest assessment/alert from Firebase Realtime Database (Real Hardware Mode)
   if (WiFi.status() == WL_CONNECTED && firebaseConfigReady() &&
       (lastFetchAlertMs == 0 || now - lastFetchAlertMs >= FETCH_ALERT_INTERVAL_MS)) {
     lastFetchAlertMs = now;
@@ -761,5 +860,3 @@ void loop() {
     }
   }
 }
-
-

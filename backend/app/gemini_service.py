@@ -24,19 +24,24 @@ logger = logging.getLogger(__name__)
 SYSTEM_INSTRUCTION = """
 You analyze environmental telemetry for an ESP32 IoT sensor node.
 Use only the supplied telemetry. Do not invent measurements or claim that a disaster is
-certain when the sensors cannot prove it. Combine temperature, humidity, rain/steam,
-water level, ultrasonic distance, and vibration. Select UNKNOWN or SENSOR_ANOMALY when
-data is missing, inconsistent, or invalid. Reserve CRITICAL for a clear, immediate risk.
+certain when the sensors cannot prove it.
+Sensor roles:
+- HC-SR04 ultrasonic sensor: Downward-facing above ground, measures snow depth/accumulation (snow_height_cm).
+- Water Level sensor: Submersion depth, measures flood water level (level_percent).
+- Steam/Rain sensor: Surface wetness/precipitation (wet_percent).
+- KS0272 sensor: Ground and structural vibration/seismic activity (peak_to_peak_raw, rms_raw).
+- DHT11 & LM35 sensors: Ambient temperature and humidity.
 
-Detect EARTHQUAKE for very strong repeated vibration and BLIZZARD for temperatures below
-0 C combined with high humidity. For the three demo scenarios: peak_to_peak_raw >= 1500
-or rms_raw >= 300 means CRITICAL/EARTHQUAKE; water_height_cm >= 80 or level_percent >= 85
-means CRITICAL/FLOOD; temperature <= 0 C and humidity_percent >= 70 means
-WARNING/BLIZZARD. Prioritize these rules when the telemetry is valid.
+Disaster detection guidelines:
+- EARTHQUAKE: peak_to_peak_raw >= 1500 or rms_raw >= 300.
+- FLOOD: water_sensor level_percent >= 80%.
+- BLIZZARD / SNOW ACCUMULATION: temperature <= 0 C combined with high humidity, or snow_height_cm >= 15 cm.
+- HEAVY RAIN: steam wet_percent >= 70% and humidity >= 80%.
 
 Write advice and reason in concise English using ASCII characters so a 16x2 LCD can show
 them. Advice must be actionable and no longer than 80 characters.
 """.strip()
+
 
 # Generate Content currently rejects Pydantic's `additionalProperties` keyword.
 # Keep the wire schema intentionally small, then validate the response strictly with LlmAnalysis.
@@ -165,15 +170,16 @@ class OpenRouterService:
         }
         openrouter_system = (
             f"{SYSTEM_INSTRUCTION}\n\n"
-            "BẮT BUỘC trả về đúng duy nhất 1 JSON object có các trường sau:\n"
+            "MANDATORY: Return ONLY a single valid JSON object matching this exact schema:\n"
             "{\n"
             '  "risk_level": "NORMAL" | "WARNING" | "CRITICAL" | "UNKNOWN",\n'
             '  "hazard": "NONE" | "FLOOD" | "HEAVY_RAIN" | "EXTREME_TEMPERATURE" | "ABNORMAL_VIBRATION" | "COMPOUND" | "SENSOR_ANOMALY" | "UNKNOWN",\n'
             '  "confidence_percent": <integer 0..100>,\n'
-            '  "advice": "<Khuyến cáo ngắn gọn bằng tiếng Việt>",\n'
-            '  "reason": "<Lý do ngắn gọn bằng tiếng Việt>"\n'
+            '  "advice": "<Concise actionable advice in English (ASCII only, max 80 chars)>",\n'
+            '  "reason": "<Brief justification in English>"\n'
             "}"
         )
+
         body = {
             "model": self._model,
             "messages": [
@@ -230,7 +236,7 @@ class RuleBasedService:
     async def analyze(self, telemetry: TelemetryRequest) -> AnalysisResponse:
         vibration = telemetry.ks0272_vibration
         water = telemetry.water_sensor.level_percent
-        snow_depth = telemetry.hc_sr04.snow_height_cm or 0
+        snow_height = telemetry.hc_sr04.snow_height_cm if telemetry.hc_sr04.snow_height_cm is not None else (telemetry.hc_sr04.water_height_cm or 0)
         wet = telemetry.steam_sensor.wet_percent
         humidity = telemetry.dht11.humidity_percent or 0
         temperatures = [
@@ -248,15 +254,13 @@ class RuleBasedService:
                 advice="Check the wiring and calibration of every failed sensor.",
                 reason="At least one sensor did not provide valid data.",
             )
-        elif (minimum_temperature <= 0 and humidity >= 70) or (
-            minimum_temperature <= 2 and snow_depth >= 15
-        ):
+        elif (minimum_temperature <= 0 and humidity >= 70) or (minimum_temperature <= 2 and snow_height >= 15):
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.CRITICAL,
                 hazard=Hazard.BLIZZARD,
                 confidence_percent=94,
                 advice="Stay indoors, keep warm, and avoid outdoor travel.",
-                reason="Subzero temperature, high humidity, or heavy snow accumulation detected.",
+                reason="Subzero temperature, high humidity, or snow accumulation indicates blizzard risk.",
             )
         elif vibration.peak_to_peak_raw >= 1500 or vibration.rms_raw >= 300:
             analysis = LlmAnalysis(
@@ -266,7 +270,7 @@ class RuleBasedService:
                 advice="Move away from glass and falling objects; take cover now.",
                 reason="Vibration amplitude or energy exceeds the earthquake threshold.",
             )
-        elif water >= 75 and vibration.peak_to_peak_raw >= 600:
+        elif water >= 80 and vibration.peak_to_peak_raw >= 600:
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.CRITICAL,
                 hazard=Hazard.COMPOUND,
@@ -274,14 +278,15 @@ class RuleBasedService:
                 advice="Leave low ground and unstable structures immediately.",
                 reason="Water level is very high while vibration exceeds the danger threshold.",
             )
-        elif water >= 75:
+        elif water >= 80:
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.CRITICAL,
                 hazard=Hazard.FLOOD,
                 confidence_percent=93,
                 advice="Move to higher ground and disconnect power in flooded areas.",
-                reason="Water sensor detected severe flood water level.",
+                reason="The water level sensor indicates critical flood submersion.",
             )
+
         elif vibration.peak_to_peak_raw >= 600 or vibration.rms_raw >= 100:
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.WARNING,

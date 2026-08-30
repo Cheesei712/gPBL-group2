@@ -137,3 +137,79 @@ bool FirebaseGateway::fetchAnalysis(ServerAnalysis &analysis, String &error) con
   analysis.buzzerMode = document["outputs"]["buzzer_mode"].as<String>();
   return true;
 }
+
+bool FirebaseGateway::fetchSimulation(SimulationState &simState, String &error) const {
+  if (WiFi.status() != WL_CONNECTED) {
+    error = "WiFi is not connected";
+    return false;
+  }
+
+  if (_firebaseUrl == nullptr || strlen(_firebaseUrl) == 0) {
+    error = "FIREBASE_URL is missing";
+    return false;
+  }
+
+  String url = String(_firebaseUrl);
+  if (url.endsWith("/")) {
+    url.remove(url.length() - 1);
+  }
+
+  url += "/devices/";
+  url += (_deviceId != nullptr && strlen(_deviceId) > 0) ? _deviceId : "esp32-node-01";
+  url += "/simulation.json";
+
+  if (_firebaseAuth != nullptr && strlen(_firebaseAuth) > 0) {
+    url += "?auth=";
+    url += _firebaseAuth;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setTimeout(FIREBASE_TIMEOUT_MS);
+  if (!http.begin(client, url)) {
+    error = "Cannot initialize WiFiClientSecure for simulation URL";
+    return false;
+  }
+
+  const int statusCode = http.GET();
+  const String responseBody = statusCode > 0 ? http.getString() : String();
+  http.end();
+
+  if (statusCode < 200 || statusCode >= 300) {
+    error = "Firebase simulation GET HTTP " + String(statusCode) + ": " + responseBody;
+    return false;
+  }
+
+  if (responseBody == "null" || responseBody.length() < 4) {
+    simState.active = false;
+    return true;
+  }
+
+  JsonDocument document;
+  const DeserializationError jsonError = deserializeJson(document, responseBody);
+  if (jsonError) {
+    error = "Invalid simulation JSON: " + String(jsonError.c_str());
+    return false;
+  }
+
+  simState.active = document["active"] | false;
+  simState.scenario = document["scenario"] | "";
+
+  if (simState.active && document["analysis"].is<JsonObject>()) {
+    JsonObject a = document["analysis"].as<JsonObject>();
+    simState.analysis.riskLevel = a["risk_level"] | "UNKNOWN";
+    simState.analysis.hazard = a["hazard"] | "UNKNOWN";
+    simState.analysis.confidencePercent = a["confidence_percent"] | 0;
+    simState.analysis.advice = a["advice"] | "";
+    simState.analysis.reason = a["reason"] | "";
+    if (a["outputs"].is<JsonObject>()) {
+      simState.analysis.ledColor = a["outputs"]["led_color"] | "BLUE";
+      simState.analysis.buzzerMode = a["outputs"]["buzzer_mode"] | "OFF";
+    }
+  }
+
+  return true;
+}
+

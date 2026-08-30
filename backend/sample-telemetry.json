@@ -13,9 +13,10 @@
   "hc_sr04": {
     "valid": true,
     "echo_time_us": 2500,
-    "distance_cm": 43.2,
-    "water_height_cm": 56.8
+    "distance_cm": 100.0,
+    "snow_height_cm": 0.0
   },
+
   "steam_sensor": {
     "valid": true,
     "adc_raw": 2100,

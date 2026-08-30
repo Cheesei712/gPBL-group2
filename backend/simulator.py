@@ -19,8 +19,8 @@ BASE_TELEMETRY: dict[str, Any] = {
     "hc_sr04": {
         "valid": True,
         "echo_time_us": 4100,
-        "distance_cm": 70.0,
-        "water_height_cm": 30.0,
+        "distance_cm": 100.0,
+        "snow_height_cm": 0.0,
     },
     "steam_sensor": {"valid": True, "adc_raw": 600, "wet_percent": 20.0},
     "water_sensor": {"valid": True, "adc_raw": 750, "level_percent": 25.0},
@@ -58,7 +58,6 @@ def generate_telemetry(scenario: str, rng: random.Random) -> dict[str, Any]:
             adc_raw=rng.randint(2600, 3000), wet_percent=rng.uniform(88, 100)
         )
         data["water_sensor"].update(adc_raw=rng.randint(2700, 3000), level_percent=height)
-        data["hc_sr04"].update(distance_cm=100 - height, water_height_cm=height, echo_time_us=700)
     elif scenario == "vibration":
         peak_to_peak = rng.randint(650, 900)
         data["ks0272_vibration"].update(
@@ -85,6 +84,8 @@ def generate_telemetry(scenario: str, rng: random.Random) -> dict[str, Any]:
         data["lm35"].update(temperature_c=-11.5)
         data["steam_sensor"].update(adc_raw=1800, wet_percent=60.0)
         data["water_sensor"].update(adc_raw=300, level_percent=10.0)
+        data["hc_sr04"].update(distance_cm=75.0, snow_height_cm=25.0, echo_time_us=4400)
+
     elif scenario == "compound":
         data = generate_telemetry("flood", rng)
         vibration = generate_telemetry("vibration", rng)["ks0272_vibration"]

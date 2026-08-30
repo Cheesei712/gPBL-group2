@@ -85,6 +85,30 @@ def write_sensor_data(data: Dict[str, Any], path: str = "/devices/simulator/tele
     return _rest_put(path, data)
 
 
+def set_simulation_state(
+    active: bool,
+    scenario: str = "normal",
+    telemetry: Optional[Dict[str, Any]] = None,
+    analysis: Optional[Dict[str, Any]] = None,
+    device_id: str = "esp32-node-01",
+) -> bool:
+    """Publish simulation state and data to Firebase to notify ESP32 and web."""
+    sim_node = {
+        "active": active,
+        "scenario": scenario,
+        "timestamp_ms": int(datetime.now(timezone.utc).timestamp() * 1000),
+    }
+    if active:
+        if telemetry:
+            sim_node["telemetry"] = telemetry
+            _rest_put(f"/devices/{device_id}/telemetry", telemetry)
+        if analysis:
+            sim_node["analysis"] = analysis
+            _rest_put(f"/devices/{device_id}/analysis", analysis)
+
+    return _rest_put(f"/devices/{device_id}/simulation", sim_node)
+
+
 def is_configured() -> bool:
     """Return True if FIREBASE_DATABASE_URL is set in environment."""
     return bool(os.getenv("FIREBASE_DATABASE_URL", ""))
