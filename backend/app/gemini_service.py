@@ -34,9 +34,13 @@ Sensor roles:
 
 Disaster detection guidelines:
 - EARTHQUAKE: peak_to_peak_raw >= 1500 or rms_raw >= 300.
-- FLOOD: water_sensor level_percent >= 80%.
-- BLIZZARD / SNOW ACCUMULATION: temperature <= 0 C combined with high humidity, or snow_height_cm >= 15 cm.
+- FLOOD / WATER HAZARD: If water_sensor level_percent >= 50%, classify risk_level as WARNING (or CRITICAL if level_percent >= 75%) and hazard as FLOOD. When level_percent < 50%, water risk MUST be NORMAL.
+- BLIZZARD / SNOW HAZARD: If hc_sr04 distance_cm <= 10.0 cm, classify risk_level as CRITICAL and hazard as BLIZZARD (snow accumulation within 10 cm of sensor). When distance_cm > 10.0 cm and temperatures are normal (> 0 C), risk_level MUST be NORMAL.
 - HEAVY RAIN: steam wet_percent >= 70% and humidity >= 80%.
+
+
+
+
 
 Write advice and reason in concise English using ASCII characters so a 16x2 LCD can show
 them. Advice must be actionable and no longer than 80 characters.
@@ -236,7 +240,7 @@ class RuleBasedService:
     async def analyze(self, telemetry: TelemetryRequest) -> AnalysisResponse:
         vibration = telemetry.ks0272_vibration
         water = telemetry.water_sensor.level_percent
-        snow_height = telemetry.hc_sr04.snow_height_cm if telemetry.hc_sr04.snow_height_cm is not None else (telemetry.hc_sr04.water_height_cm or 0)
+        distance = telemetry.hc_sr04.distance_cm if telemetry.hc_sr04.distance_cm is not None else 400.0
         wet = telemetry.steam_sensor.wet_percent
         humidity = telemetry.dht11.humidity_percent or 0
         temperatures = [
@@ -254,14 +258,17 @@ class RuleBasedService:
                 advice="Check the wiring and calibration of every failed sensor.",
                 reason="At least one sensor did not provide valid data.",
             )
-        elif (minimum_temperature <= 0 and humidity >= 70) or (minimum_temperature <= 2 and snow_height >= 15):
+        elif distance <= 10.0 or (minimum_temperature <= 0 and humidity >= 70) or (minimum_temperature <= 2 and distance <= 20.0):
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.CRITICAL,
                 hazard=Hazard.BLIZZARD,
                 confidence_percent=94,
-                advice="Stay indoors, keep warm, and avoid outdoor travel.",
-                reason="Subzero temperature, high humidity, or snow accumulation indicates blizzard risk.",
+                advice="Snow is within 10cm of sensor. Clear snow immediately.",
+                reason=f"Ultrasonic distance is {distance:.1f} cm (<= 10 cm critical threshold).",
             )
+
+
+
         elif vibration.peak_to_peak_raw >= 1500 or vibration.rms_raw >= 300:
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.CRITICAL,
@@ -278,13 +285,21 @@ class RuleBasedService:
                 advice="Leave low ground and unstable structures immediately.",
                 reason="Water level is very high while vibration exceeds the danger threshold.",
             )
-        elif water >= 80:
+        elif water >= 75:
             analysis = LlmAnalysis(
                 risk_level=RiskLevel.CRITICAL,
                 hazard=Hazard.FLOOD,
-                confidence_percent=93,
+                confidence_percent=95,
                 advice="Move to higher ground and disconnect power in flooded areas.",
-                reason="The water level sensor indicates critical flood submersion.",
+                reason=f"The water level sensor indicates critical flood submersion ({water:.1f}% >= 75%).",
+            )
+        elif water >= 50:
+            analysis = LlmAnalysis(
+                risk_level=RiskLevel.WARNING,
+                hazard=Hazard.FLOOD,
+                confidence_percent=90,
+                advice="Caution: Water level rising. Monitor drainage and low areas.",
+                reason=f"Water level reached {water:.1f}% (>= 50% warning threshold).",
             )
 
         elif vibration.peak_to_peak_raw >= 600 or vibration.rms_raw >= 100:

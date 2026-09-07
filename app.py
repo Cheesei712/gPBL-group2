@@ -213,17 +213,29 @@ def _init_state():
         "last_sensor":        {},
         "email_status":       "",
         "fb_path":            os.getenv("FIREBASE_SENSOR_PATH", FIREBASE_SENSOR_PATH),
-        # Simulator state
+        # Simulator state — always default to inactive (real sensor mode)
         "sim_active":         False,
         "sim_scenario":       "normal",
         "sim_intensity":      1.0,
         "sim_push_count":     0,
+        "_startup_sim_reset": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
+    if not st.session_state.get("_startup_sim_reset"):
+        st.session_state["_startup_sim_reset"] = True
+        st.session_state["sim_active"] = False
+        st.session_state["sim_scenario"] = "normal"
+        st.session_state["sim_push_count"] = 0
+        try:
+            fb.set_simulation_state(active=False, scenario="normal", device_id="esp32-node-01")
+        except Exception:
+            pass
+
 _init_state()
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -365,6 +377,7 @@ def _rule_based_assessment(d: dict) -> dict:
     temp      = d.get("temperature", 25)
     hum       = d.get("humidity", 50)
     dist      = d.get("distance", 400)
+    snow_h    = d.get("snow_height", 0)
     steam     = d.get("steam_value", 0)
     water_lvl = d.get("water_level", 0)
     accel_mag = d.get("accel_mag", 0)
@@ -377,44 +390,54 @@ def _rule_based_assessment(d: dict) -> dict:
     reason  = "All parameters within normal thresholds."
     conf    = 0.95
 
+    # 1. Seismic / Earthquake (KS0272)
     if accel_mag >= THRESHOLDS["accel_critical"]:
         alert, hazard, color, buzzer = "CRITICAL", "EARTHQUAKE", "RED", True
         message = "STRONG EARTHQUAKE! Drop, cover, and hold on!"
-        reason  = f"Seismic acceleration {accel_mag:.2f}g exceeded critical threshold."
+        reason  = f"Seismic vibration {accel_mag:.2f}g exceeded critical threshold."
         conf    = 0.98
     elif accel_mag >= THRESHOLDS["accel_warning"]:
         alert, hazard, color, buzzer = "WARNING", "EARTHQUAKE", "YELLOW", True
         message = "WARNING: Abnormal vibration. Monitor immediately."
         reason  = f"Acceleration {accel_mag:.2f}g indicates seismic tremor."
         conf    = 0.85
-    elif water_lvl >= THRESHOLDS["water_level_critical"] or (
-        dist <= THRESHOLDS["distance_flood_crit"] and hum >= THRESHOLDS["humidity_flood_risk"]
-    ):
+    # 2. Flood (ONLY from Water Level Sensor submersion depth)
+    elif water_lvl >= THRESHOLDS["water_level_critical"]:
         alert, hazard, color, buzzer = "CRITICAL", "FLOOD", "RED", True
-        message = "FLASH FLOOD CRITICAL! Evacuate to higher ground!"
-        reason  = f"Water level {water_lvl:.0f}%, distance {dist}cm, humidity {hum:.0f}%."
-        conf    = 0.92
-    elif water_lvl >= THRESHOLDS["water_level_warning"] or steam >= THRESHOLDS["steam_critical"]:
+        message = "CRITICAL FLOOD! Evacuate to higher ground immediately!"
+        reason  = f"Water level sensor submerged at {water_lvl:.0f}%."
+        conf    = 0.95
+    elif water_lvl >= THRESHOLDS["water_level_warning"]:
         alert, hazard, color, buzzer = "WARNING", "FLOOD", "YELLOW", False
         message = "FLOOD WARNING: Water rising. Monitor closely."
-        reason  = f"Water level {water_lvl:.0f}% or heavy rain ({steam} ADC)."
-        conf    = 0.80
-    elif temp <= THRESHOLDS["temp_blizzard"] and dist <= 100 and steam >= THRESHOLDS["steam_warning"]:
+        reason  = f"Water level sensor reading {water_lvl:.0f}%."
+        conf    = 0.85
+    # 3. Blizzard / Snowstorm (HC-SR04 distance <= 10 cm from sensor)
+    elif dist <= 10.0 or (temp <= THRESHOLDS["temp_blizzard"] and (hum >= 70 or dist <= 20.0)) or (temp <= 2.0 and dist <= 20.0):
         alert, hazard, color, buzzer = "CRITICAL", "SNOWSTORM", "BLUE", True
-        message = "BLIZZARD! Do not go outside. Stay safe indoors!"
-        reason  = f"Temperature {temp}°C, snow accumulating rapidly, {dist}cm to ground."
-        conf    = 0.88
-    elif temp <= THRESHOLDS["temp_freeze"] and steam >= THRESHOLDS["steam_warning"]:
+        message = "BLIZZARD! Snow is within 10cm of sensor. Clear snow now!"
+        reason  = f"Measured distance to snow is {dist:.1f} cm (<= 10 cm threshold)."
+        conf    = 0.92
+    elif temp <= THRESHOLDS["temp_freeze"] and (steam >= THRESHOLDS["steam_warning"] or dist <= 25.0):
         alert, hazard, color, buzzer = "WARNING", "SNOWSTORM", "BLUE", False
-        message = "FREEZE WARNING: Low temperature, snow falling."
-        reason  = f"Temperature {temp}°C, moisture sensor: {steam} ADC."
-        conf    = 0.78
+        message = "FREEZE WARNING: Low temperature and snow accumulation."
+        reason  = f"Temperature {temp}°C, distance: {dist:.1f} cm."
+        conf    = 0.80
+
+
+    # 4. Heavy Rain / Precipitation (Steam sensor)
+    elif steam >= THRESHOLDS["steam_critical"] and hum >= 80:
+        alert, hazard, color, buzzer = "WARNING", "HEAVY_RAIN", "YELLOW", False
+        message = "HEAVY RAIN WARNING: Rain precipitation detected."
+        reason  = f"Rain/Steam sensor: {steam} ADC, humidity: {hum:.0f}%."
+        conf    = 0.85
 
     return {
         "alert_level": alert, "hazard_type": hazard, "rgb_color": color,
         "buzzer_active": buzzer, "lcd_message": message,
         "confidence": conf, "reasoning": reason, "source": "rule-based",
     }
+
 
 
 def fetch_and_analyze():

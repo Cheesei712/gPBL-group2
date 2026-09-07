@@ -38,7 +38,7 @@
 // Steam/Rain AO          -> GPIO 35 (ADC1, input only, power module with 3.3V)
 // Water level AO         -> GPIO 32 (ADC1, power module with 3.3V)
 // KS0272 Vibration S     -> GPIO 36 (ADC1, input only, GPIO 33 reserved for RGB Green)
-// RGB common VCC/anode   -> R: GPIO 25, G: GPIO 33, B: GPIO 27 (active LOW)
+// RGB common VCC/anode   -> R: GPIO 27, G: GPIO 25, B: GPIO 33 (active LOW)
 // Active buzzer          -> GPIO 18
 // All modules must share common GND with ESP32.
 
@@ -51,10 +51,11 @@ constexpr uint8_t LM35_PIN = 34;
 constexpr uint8_t STEAM_PIN = 35;
 constexpr uint8_t WATER_PIN = 32;
 constexpr uint8_t VIBRATION_PIN = 36;
-constexpr uint8_t RGB_RED_PIN = 25;
-constexpr uint8_t RGB_GREEN_PIN = 33;
-constexpr uint8_t RGB_BLUE_PIN = 27;
+constexpr uint8_t RGB_RED_PIN = 27;
+constexpr uint8_t RGB_GREEN_PIN = 25;
+constexpr uint8_t RGB_BLUE_PIN = 33;
 constexpr uint8_t BUZZER_PIN = 18;
+
 constexpr uint8_t RGB_RED_PWM_CHANNEL = 0;
 constexpr uint8_t RGB_GREEN_PWM_CHANNEL = 1;
 constexpr uint8_t RGB_BLUE_PWM_CHANNEL = 2;
@@ -69,9 +70,11 @@ constexpr uint8_t LCD_ROWS = 2;
 
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t SAMPLE_INTERVAL_MS = 2000;
-constexpr uint32_t ANALYZE_INTERVAL_MS = 60000;
-constexpr uint32_t FETCH_ALERT_INTERVAL_MS = 3000;
+constexpr uint32_t ANALYZE_INTERVAL_MS = 10000;
+constexpr uint32_t FETCH_ALERT_INTERVAL_MS = 10000;
+constexpr uint32_t FETCH_SIM_INTERVAL_MS = 10000;
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 10000;
+
 
 constexpr uint32_t ULTRASONIC_TIMEOUT_US = 30000;
 constexpr uint8_t ULTRASONIC_SAMPLE_COUNT = 5;
@@ -89,8 +92,9 @@ constexpr uint8_t ANALOG_SAMPLE_COUNT = 16;
 constexpr int ADC_HIGH_RAIL_THRESHOLD = 4090;
 
 // Distance from HC-SR04 to ground surface (used for snow depth calculation).
-// Measure and calibrate this value after physical sensor installation.
-constexpr float SENSOR_TO_GROUND_CM = 100.0F;
+// Set to 20.0 cm baseline.
+constexpr float SENSOR_TO_GROUND_CM = 20.0F;
+
 
 
 // ADC Calibration: recorded raw values when dry and when fully wet/submerged.
@@ -109,6 +113,7 @@ class AdviceDisplay {
  public:
   void begin() {
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    Wire.setTimeOut(50);
     lcd.init();
     lcd.backlight();
     showStatus("BOOTING ESP32", "Please wait...");
@@ -635,31 +640,29 @@ void connectWifi() {
 bool isEmergencyTelemetry(const SensorData &data) {
   const bool earthquake = data.vibrationValid &&
                           (data.vibrationPeakToPeak >= 1000 || data.vibrationRmsRaw >= 200.0F);
-  const bool flood = data.waterValid && data.waterPercent >= 75.0F;
-  const bool blizzard = data.ultrasonicValid && data.snowHeightCm >= 15.0F &&
-                        (!isnan(data.lm35TemperatureC) && data.lm35TemperatureC <= 2.0F);
+  const bool flood = data.waterValid && data.waterPercent >= 50.0F;
+  const bool blizzard = data.ultrasonicValid &&
+                        (data.ultrasonicDistanceCm <= 10.0F ||
+                         (data.ultrasonicDistanceCm <= 20.0F && (!isnan(data.lm35TemperatureC) && data.lm35TemperatureC <= 2.0F)));
   const bool heavyRain = data.steamValid && data.steamPercent >= 75.0F;
   return earthquake || flood || blizzard || heavyRain;
 }
 
-bool requestAnalysis(const String &payload) {
 
+
+
+bool requestAnalysis(const String &payload) {
   ServerAnalysis analysis;
   String error;
-  display.showStatus("Connecting API", "Analyzing...");
   Serial.println("API STATUS    | Sending real sensor data to backend");
   Serial.printf("POST %s\n", DEVICE_SERVER_URL);
   if (!gateway.analyze(payload, analysis, error)) {
     Serial.printf("SERVER ERROR  | %s\n", error.c_str());
     Serial.println("API STATUS    | Connection failed; retry pending");
-    display.showStatus("API failed", "Retry pending");
     return false;
   }
 
   Serial.println("API STATUS    | Backend response received successfully");
-  display.showStatus("API connected", "Gemini online");
-  delay(STATUS_HOLD_MS);
-
   Serial.printf("SERVER RESULT | risk=%s | hazard=%s | confidence=%d%%\n",
                 analysis.riskLevel.c_str(), analysis.hazard.c_str(),
                 analysis.confidencePercent);
@@ -692,7 +695,7 @@ void setup() {
   pinMode(VIBRATION_PIN, INPUT);
 
   pinMode(BUZZER_PIN, OUTPUT);
-  digitalWrite(BUZZER_PIN, HIGH);
+  digitalWrite(BUZZER_PIN, LOW);
 
   analogReadResolution(12);
   analogSetPinAttenuation(LM35_PIN, ADC_11db);
@@ -721,8 +724,8 @@ void loop() {
   static uint32_t lastSampleMs = 0;
   static uint32_t lastAnalyzeMs = 0;
   static uint32_t lastWifiRetryMs = 0;
-  static uint32_t lastFetchAlertMs = 0;
-  static uint32_t lastFetchSimMs = 0;
+  static uint32_t lastFetchAlertMs = 6000;
+  static uint32_t lastFetchSimMs = 3000;
   static String lastRiskLevel = "";
   static String lastHazard = "";
   static bool wasSimActive = false;
@@ -735,7 +738,7 @@ void loop() {
   const uint32_t now = millis();
   if (deviceConfigReady() && WiFi.status() != WL_CONNECTED &&
       now - lastWifiRetryMs >= WIFI_RETRY_INTERVAL_MS) {
-    lastWifiRetryMs = now;
+    lastWifiRetryMs = millis();
     display.showStatus("Reconnecting WiFi", DEVICE_WIFI_SSID);
     Serial.println("SYSTEM STATUS | Retrying WiFi connection");
     WiFi.reconnect();
@@ -754,14 +757,15 @@ void loop() {
     }
   }
 
-  // 0. Check Simulation Mode from Firebase Realtime Database
+  // 0. Check Simulation Mode from Backend Gateway
   static bool isSimActive = false;
   static SimulationState simState;
-  if (WiFi.status() == WL_CONNECTED && firebaseConfigReady() &&
-      (lastFetchSimMs == 0 || now - lastFetchSimMs >= 1500)) {
-    lastFetchSimMs = now;
+  if (WiFi.status() == WL_CONNECTED && deviceConfigReady() &&
+      now - lastFetchSimMs >= FETCH_SIM_INTERVAL_MS) {
+
+    lastFetchSimMs = millis();
     String simErr;
-    if (firebaseGateway.fetchSimulation(simState, simErr)) {
+    if (gateway.fetchSimulation(simState, simErr)) {
       isSimActive = simState.active;
       if (isSimActive) {
         if (!wasSimActive || simState.scenario != lastSimScenario ||
@@ -797,65 +801,44 @@ void loop() {
     }
   }
 
-  // If Simulation Mode is active, SKIP reading physical sensors and SKIP pushing to Firebase
-  if (isSimActive) {
-    return;
-  }
-
-  // 1. Read real sensor telemetry and push to Firebase & Backend (Real Hardware Mode)
+  // 1. Read real sensor telemetry and print to Serial Monitor (Every 2000ms)
   if (lastSampleMs == 0 || now - lastSampleMs >= SAMPLE_INTERVAL_MS) {
-    lastSampleMs = now;
+    lastSampleMs = millis();
     const SensorData data = readAllSensors();
     const String payload = buildJsonPayload(data);
     printReport(data, payload);
 
-    if (WiFi.status() == WL_CONNECTED) {
-      // Push real telemetry to Firebase Realtime Database
-      if (firebaseConfigReady()) {
-        String fbError;
-        if (firebaseGateway.pushTelemetry(payload, fbError)) {
-          Serial.println("FIREBASE RTDB | Real telemetry pushed (overwritten latest data)");
-        } else {
-          Serial.printf("FIREBASE ERROR| %s\n", fbError.c_str());
-        }
+    if (!isSimActive && WiFi.status() == WL_CONNECTED) {
+      static bool wasEmergency = false;
+      const bool isEmergency = isEmergencyTelemetry(data);
+      const bool emergencyCleared = wasEmergency && !isEmergency;
+      const bool emergencyStarted = !wasEmergency && isEmergency;
+      wasEmergency = isEmergency;
+
+      if (emergencyCleared) {
+        Serial.println("STATUS RESTORED | Hazard cleared! Restoring NORMAL state immediately.");
+        ServerAnalysis normalState;
+        normalState.riskLevel = "NORMAL";
+        normalState.hazard = "NONE";
+        normalState.confidencePercent = 100;
+        normalState.advice = "All systems normal. Conditions stable.";
+        normalState.reason = "Sensor telemetry returned to safe thresholds.";
+        normalState.ledColor = "GREEN";
+        normalState.buzzerMode = "OFF";
+        outputs.apply(normalState);
+        display.apply(normalState);
       }
 
-      // Request AI assessment: trigger IMMEDIATELY on emergency event, or periodically every ANALYZE_INTERVAL_MS
-      const bool isEmergency = isEmergencyTelemetry(data);
-      constexpr uint32_t EMERGENCY_COOLDOWN_MS = 3000;
-      const bool canTriggerEmergency = isEmergency && (now - lastAnalyzeMs >= EMERGENCY_COOLDOWN_MS);
-      const bool timeToAnalyze = (lastAnalyzeMs == 0 || now - lastAnalyzeMs >= ANALYZE_INTERVAL_MS);
+      constexpr uint32_t EMERGENCY_COOLDOWN_MS = 5000;
+      const bool canTriggerEmergency = emergencyStarted || (isEmergency && (millis() - lastAnalyzeMs >= EMERGENCY_COOLDOWN_MS));
+      const bool timeToAnalyze = (lastAnalyzeMs == 0 || millis() - lastAnalyzeMs >= ANALYZE_INTERVAL_MS || emergencyCleared);
 
       if (canTriggerEmergency || timeToAnalyze) {
-        lastAnalyzeMs = now;
+        lastAnalyzeMs = millis();
         if (isEmergency) {
           Serial.println("EMERGENCY EVENT | Immediate hazard spike detected! Triggering instant AI analysis.");
         }
         requestAnalysis(payload);
-      }
-    }
-  }
-
-  // 2. Fetch latest assessment/alert from Firebase Realtime Database (Real Hardware Mode)
-  if (WiFi.status() == WL_CONNECTED && firebaseConfigReady() &&
-      (lastFetchAlertMs == 0 || now - lastFetchAlertMs >= FETCH_ALERT_INTERVAL_MS)) {
-    lastFetchAlertMs = now;
-    ServerAnalysis fbAnalysis;
-    String fbError;
-    if (firebaseGateway.fetchAnalysis(fbAnalysis, fbError)) {
-      if (fbAnalysis.riskLevel != lastRiskLevel || fbAnalysis.hazard != lastHazard) {
-        lastRiskLevel = fbAnalysis.riskLevel;
-        lastHazard = fbAnalysis.hazard;
-        Serial.println("\n============================================================");
-        Serial.printf("FIREBASE ALERT | risk=%s | hazard=%s | confidence=%d%%\n",
-                      fbAnalysis.riskLevel.c_str(), fbAnalysis.hazard.c_str(),
-                      fbAnalysis.confidencePercent);
-        Serial.printf("ADVICE         | %s\n", fbAnalysis.advice.c_str());
-        Serial.printf("OUTPUTS        | LED=%s | buzzer=%s\n",
-                      fbAnalysis.ledColor.c_str(), fbAnalysis.buzzerMode.c_str());
-        Serial.println("============================================================");
-        outputs.apply(fbAnalysis);
-        display.apply(fbAnalysis);
       }
     }
   }

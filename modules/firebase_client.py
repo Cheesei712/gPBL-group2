@@ -68,16 +68,31 @@ def _rest_put(path: str, data: Dict[str, Any]) -> bool:
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-def get_sensor_data(path: str = "/sensors/node1") -> Optional[Dict[str, Any]]:
+def get_sensor_data(path: str = "/devices/esp32-node-01/telemetry") -> Optional[Dict[str, Any]]:
     """
     Fetch latest sensor snapshot from Firebase Realtime DB via REST.
     Returns normalized dict or None if unavailable.
     """
     data = _rest_get(path)
     if data and isinstance(data, dict):
-        return _normalize(data)
+        normalized = _normalize(data)
+        # Fetch AI analysis from sibling node if querying device telemetry
+        if "/telemetry" in path:
+            analysis_path = path.replace("/telemetry", "/analysis")
+            analysis_data = _rest_get(analysis_path)
+            if analysis_data and isinstance(analysis_data, dict):
+                normalized["alert_level"] = analysis_data.get("risk_level", "NORMAL")
+                normalized["hazard_type"] = analysis_data.get("hazard", "NORMAL")
+                normalized["rgb_color"] = analysis_data.get("outputs", {}).get("led_color", "GREEN")
+                normalized["buzzer_active"] = analysis_data.get("outputs", {}).get("buzzer_mode", "OFF") != "OFF"
+                normalized["lcd_message"] = analysis_data.get("advice", "System normal.")
+                normalized["confidence"] = float(analysis_data.get("confidence_percent", 100)) / 100.0
+                normalized["reasoning"] = analysis_data.get("reason", "")
+                normalized["source"] = f"Gemini AI ({analysis_data.get('model', 'gemini-3.5-flash-lite')})"
+        return normalized
     logger.warning(f"No data at Firebase path: {path}")
     return None
+
 
 
 def write_sensor_data(data: Dict[str, Any], path: str = "/devices/simulator/telemetry") -> bool:
@@ -130,8 +145,10 @@ def _normalize(raw: Dict[str, Any]) -> Dict[str, Any]:
     temp      = float(dht11.get("temperature_c", raw.get("temperature", 0.0)))
     hum       = float(dht11.get("humidity_percent", raw.get("humidity", 0.0)))
     dist      = float(hc_sr04.get("distance_cm", raw.get("distance", 400.0)))
+    snow_h    = float(hc_sr04.get("snow_height_cm", 0.0))
     steam_val = int(steam.get("adc_raw", raw.get("steam_value", 0)))
     water_lvl = float(water.get("level_percent", raw.get("water_level", 0.0)))
+
 
     # Accel mapping: use ks0272 peak_to_peak if nested, otherwise calculate from x,y,z
     ax = float(raw.get("accel_x", 0.0))
@@ -160,7 +177,9 @@ def _normalize(raw: Dict[str, Any]) -> Dict[str, Any]:
         "temperature":  temp,
         "humidity":     hum,
         "distance":     dist,
+        "snow_height":  snow_h,
         "steam_value":  steam_val,
+
         "water_level":  water_lvl,
         "accel_x":      ax,
         "accel_y":      ay,

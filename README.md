@@ -18,9 +18,10 @@ The ESP32 Dev Module uses the pin assignments specified in `src/main.cpp`:
 | **Steam / Rain AO** | GPIO 35 | Analog (ADC1) | Analog rain/moisture level (input only) |
 | **Water Level AO** | GPIO 32 | Analog (ADC1) | Submersion depth level |
 | **KS0272 Vibration S** | GPIO 36 | Analog (ADC1) | Piezo vibration sensor (input only) |
-| **RGB LED Red** | GPIO 25 | PWM Output | Connected via 220–330 Ω resistor |
-| **RGB LED Green** | GPIO 33 | PWM Output | Connected via 220–330 Ω resistor |
-| **RGB LED Blue** | GPIO 27 | PWM Output | Connected via 220–330 Ω resistor |
+| **RGB LED Red** | GPIO 27 | PWM Output | Connected via 220–330 Ω resistor |
+| **RGB LED Green** | GPIO 25 | PWM Output | Connected via 220–330 Ω resistor |
+| **RGB LED Blue** | GPIO 33 | PWM Output | Connected via 220–330 Ω resistor |
+
 | **RGB Common Anode** | 3.3V / VCC | Power | Active-Low common anode configuration |
 | **Active Buzzer** | GPIO 18 | Digital Output | Continuous and intermittent alarm signaling |
 

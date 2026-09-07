@@ -1,6 +1,7 @@
 """Project configuration for thresholds, metadata, and alert settings."""
 
-FIREBASE_SENSOR_PATH = "/sensors/node1"
+FIREBASE_SENSOR_PATH = "/devices/esp32-node-01/telemetry"
+
 
 SENSOR_META = {
     "temperature":  {"label": "Temperature",   "unit": "°C",   "icon": "🌡️",  "min": -10,  "max": 60},
@@ -12,8 +13,8 @@ SENSOR_META = {
 }
 
 THRESHOLDS = {
-    "water_level_warning":  60.0,
-    "water_level_critical": 80.0,
+    "water_level_warning":  50.0,
+    "water_level_critical": 75.0,
     "distance_flood_warn":  100.0,
     "distance_flood_crit":  50.0,
     "steam_warning":        1500,

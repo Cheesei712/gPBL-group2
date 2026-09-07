@@ -6,7 +6,7 @@
 #include <WiFiClientSecure.h>
 
 namespace {
-constexpr uint32_t FIREBASE_TIMEOUT_MS = 10000;
+constexpr uint32_t FIREBASE_TIMEOUT_MS = 3500;
 }
 
 FirebaseGateway::FirebaseGateway(const char *firebaseUrl, const char *firebaseAuth,
@@ -42,6 +42,7 @@ bool FirebaseGateway::pushTelemetry(const String &telemetryJson, String &error) 
 
   WiFiClientSecure client;
   client.setInsecure();
+  client.setHandshakeTimeout(3);
 
   HTTPClient http;
   http.setTimeout(FIREBASE_TIMEOUT_MS);
@@ -56,6 +57,8 @@ bool FirebaseGateway::pushTelemetry(const String &telemetryJson, String &error) 
   const int statusCode = http.PUT(telemetryJson);
   const String responseBody = statusCode > 0 ? http.getString() : String();
   http.end();
+  client.stop();
+
 
   if (statusCode < 200 || statusCode >= 300) {
     error = "HTTP " + String(statusCode) + ": " + responseBody;
@@ -92,6 +95,7 @@ bool FirebaseGateway::fetchAnalysis(ServerAnalysis &analysis, String &error) con
 
   WiFiClientSecure client;
   client.setInsecure();
+  client.setHandshakeTimeout(3);
 
   HTTPClient http;
   http.setTimeout(FIREBASE_TIMEOUT_MS);
@@ -103,6 +107,8 @@ bool FirebaseGateway::fetchAnalysis(ServerAnalysis &analysis, String &error) con
   const int statusCode = http.GET();
   const String responseBody = statusCode > 0 ? http.getString() : String();
   http.end();
+  client.stop();
+
 
   if (statusCode < 200 || statusCode >= 300) {
     error = "Firebase GET HTTP " + String(statusCode) + ": " + responseBody;
@@ -165,6 +171,7 @@ bool FirebaseGateway::fetchSimulation(SimulationState &simState, String &error) 
 
   WiFiClientSecure client;
   client.setInsecure();
+  client.setHandshakeTimeout(3);
 
   HTTPClient http;
   http.setTimeout(FIREBASE_TIMEOUT_MS);
@@ -176,6 +183,8 @@ bool FirebaseGateway::fetchSimulation(SimulationState &simState, String &error) 
   const int statusCode = http.GET();
   const String responseBody = statusCode > 0 ? http.getString() : String();
   http.end();
+  client.stop();
+
 
   if (statusCode < 200 || statusCode >= 300) {
     error = "Firebase simulation GET HTTP " + String(statusCode) + ": " + responseBody;
